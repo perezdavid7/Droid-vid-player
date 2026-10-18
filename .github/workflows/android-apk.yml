@@ -63,6 +63,9 @@ jobs:
             chmod 600 android/key.properties
             echo 'DROID_SIGNING_CONFIGURED=true' >> "$GITHUB_ENV"
             echo 'Stable signing key present: building an updateable release APK.'
+          elif [[ -n "$SIGNING_JKS_BASE64" || -n "$SIGNING_PASSWORD" || -n "$SIGNING_ALIAS" ]]; then
+            echo '::error::Signing secrets incomplete. Configure ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS together.'
+            exit 1
           else
             echo 'DROID_SIGNING_CONFIGURED=false' >> "$GITHUB_ENV"
             echo '::warning::Persistent signing not configured. Debug APK will not update prior builds with other signing keys.'
