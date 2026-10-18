@@ -146,7 +146,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final jumpedBack = _lastPosition != null &&
           _lastPosition! - position > const Duration(seconds: 3) &&
           state.playing && !state.completed &&
-          DateTime.now().isAfter(_ignorePositionBackstepsUntil);
+          DateTime.now().isAfter(_ignorePositionBackstepsUntil) &&
+          _repeatMode == PlaylistMode.none;
       if ((beyond || jumpedBack) && !_unreliableDuration) {
         setState(() => _unreliableDuration = true);
       }
