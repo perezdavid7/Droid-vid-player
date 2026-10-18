@@ -45,9 +45,65 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _hideTimer;
   StreamSubscription<bool>? _playingSubscription;
 
+  // One transform for the full video viewport; gestures and buttons share it.
+  final TransformationController _zoomController = TransformationController();
+  double _zoom = 1.0;
+  Size _videoViewport = Size.zero;
+  Offset _doubleTapPosition = Offset.zero;
+
+  static const double _maxZoom = 6.0;
+
+  void _onZoomChanged() {
+    final value = _zoomController.value.getMaxScaleOnAxis();
+    if (mounted && (_zoom - value).abs() > 0.01) {
+      setState(() => _zoom = value);
+    }
+  }
+
+  void _resetZoom({bool wakeControls = true}) {
+    _zoomController.value = Matrix4.identity();
+    if (wakeControls) _wakeControls();
+  }
+
+  // Retain the chosen point under the finger while changing scale.
+  void _setZoom(double requested, Offset focalPoint) {
+    if (_videoViewport.isEmpty) return;
+    final target = requested.clamp(1.0, _maxZoom);
+    if (target <= 1.001) {
+      _resetZoom();
+      return;
+    }
+
+    final scenePoint = _zoomController.toScene(focalPoint);
+    final dx = (focalPoint.dx - target * scenePoint.dx)
+        .clamp(_videoViewport.width * (1 - target), 0.0);
+    final dy = (focalPoint.dy - target * scenePoint.dy)
+        .clamp(_videoViewport.height * (1 - target), 0.0);
+    _zoomController.value = Matrix4.identity()
+      ..setEntry(0, 0, target)
+      ..setEntry(1, 1, target)
+      ..setEntry(0, 3, dx)
+      ..setEntry(1, 3, dy);
+    _wakeControls();
+  }
+
+  void _zoomBy(double factor) {
+    final center = Offset(_videoViewport.width / 2, _videoViewport.height / 2);
+    _setZoom(_zoom * factor, center);
+  }
+
+  void _doubleTapZoom() {
+    if (_zoom > 1.05) {
+      _resetZoom();
+    } else {
+      _setZoom(2.5, _doubleTapPosition);
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+    _zoomController.addListener(_onZoomChanged);
     _playingSubscription = player.stream.playing.listen((playing) {
       if (!mounted) return;
       setState(() {
@@ -128,6 +184,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void dispose() {
     _hideTimer?.cancel();
     _playingSubscription?.cancel();
+    _zoomController.removeListener(_onZoomChanged);
+    _zoomController.dispose();
     if (_fullScreen) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     }
@@ -168,6 +226,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       error = null;
       _showControls = true;
     });
+    _resetZoom(wakeControls: false);
     await player.open(Playlist(
       paths.map((path) => Media(Uri.file(path).toString())).toList(),
       index: start < 0 ? 0 : start,
@@ -239,6 +298,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       IconButton(
         tooltip: 'Previous video',
         onPressed: files.isEmpty ? null : () {
+          _resetZoom(wakeControls: false);
           _wakeControls();
           player.previous();
         },
@@ -271,6 +331,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       IconButton(
         tooltip: 'Next video',
         onPressed: files.isEmpty ? null : () {
+          _resetZoom(wakeControls: false);
           _wakeControls();
           player.next();
         },
@@ -301,7 +362,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         tooltip: 'Rotate video 90 degrees',
         onPressed: () {
           setState(() => turns = (turns + 1) % 4);
-          _wakeControls();
+          _resetZoom();
         },
         icon: const Icon(Icons.rotate_right),
       ),
@@ -309,7 +370,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         tooltip: fill ? 'Fit video' : 'Fill screen (crop to fit)',
         onPressed: () {
           setState(() => fill = !fill);
-          _wakeControls();
+          _resetZoom();
         },
         icon: Icon(fill ? Icons.fit_screen : Icons.zoom_out_map),
       ),
@@ -319,6 +380,79 @@ class _PlayerScreenState extends State<PlayerScreen> {
         icon: Icon(_fullScreen ? Icons.fullscreen_exit : Icons.fullscreen),
       ),
     ],
+  );
+
+  Widget _zoomButtons() => Row(
+    mainAxisSize: MainAxisSize.min,
+    mainAxisAlignment: MainAxisAlignment.center,
+    children: [
+      IconButton(
+        tooltip: 'Zoom out',
+        onPressed: files.isEmpty || _zoom <= 1.01
+            ? null
+            : () => _zoomBy(1 / 1.5),
+        icon: const Icon(Icons.zoom_out),
+      ),
+      SizedBox(
+        width: 55,
+        child: Text(
+          '${_zoom.toStringAsFixed(1)}×',
+          textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 14, color: Colors.white),
+        ),
+      ),
+      IconButton(
+        tooltip: 'Zoom in',
+        onPressed: files.isEmpty || _zoom >= _maxZoom - 0.01
+            ? null
+            : () => _zoomBy(1.5),
+        icon: const Icon(Icons.zoom_in),
+      ),
+      IconButton(
+        tooltip: 'Reset zoom and pan',
+        onPressed: _zoom <= 1.01 ? null : _resetZoom,
+        icon: const Icon(Icons.center_focus_strong),
+      ),
+    ],
+  );
+
+  Widget _videoWithGestures() => LayoutBuilder(
+    builder: (context, constraints) {
+      _videoViewport = constraints.biggest;
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _tapVideo,
+        onDoubleTapDown: (details) {
+          _doubleTapPosition = details.localPosition;
+        },
+        onDoubleTap: _doubleTapZoom,
+        child: ClipRect(
+          child: InteractiveViewer(
+            transformationController: _zoomController,
+            minScale: 1.0,
+            maxScale: _maxZoom,
+            panEnabled: _zoom > 1.01,
+            scaleEnabled: true,
+            boundaryMargin: EdgeInsets.zero,
+            clipBehavior: Clip.hardEdge,
+            onInteractionStart: (_) => _hideTimer?.cancel(),
+            onInteractionEnd: (_) => _scheduleAutoHide(),
+            child: SizedBox(
+              width: constraints.maxWidth,
+              height: constraints.maxHeight,
+              child: RotatedBox(
+                quarterTurns: turns,
+                child: Video(
+                  controller: video,
+                  fit: fill ? BoxFit.cover : BoxFit.contain,
+                  controls: NoVideoControls,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    },
   );
 
   Widget _overlayToolbar() => SafeArea(
@@ -377,11 +511,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     if (wide)
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: [_transportButtons(), _displayButtons()],
+                        children: [
+                          _transportButtons(),
+                          _displayButtons(),
+                          _zoomButtons(),
+                        ],
                       )
                     else ...[
                       _transportButtons(),
                       _displayButtons(),
+                      _zoomButtons(),
                     ],
                   ],
                 ),
@@ -420,24 +559,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
           color: Colors.black,
           child: files.isEmpty
               ? const Center(child: Text('Open a video to begin'))
-              : ClipRect(
-                  child: RotatedBox(
-                    quarterTurns: turns,
-                    child: Video(
-                      controller: video,
-                      fit: fill ? BoxFit.cover : BoxFit.contain,
-                      controls: NoVideoControls,
-                    ),
-                  ),
-                ),
+              : _videoWithGestures(),
         ),
-        if (files.isNotEmpty)
-          Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onTap: _tapVideo,
-            ),
-          ),
         if (_showControls && files.isNotEmpty)
           Positioned(left: 0, top: 0, right: 0,
               child: _overlayToolbar()),
