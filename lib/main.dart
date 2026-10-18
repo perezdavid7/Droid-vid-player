@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -44,6 +45,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _scrubbing = false;
   Timer? _hideTimer;
   StreamSubscription<bool>? _playingSubscription;
+  StreamSubscription<bool>? _completedSubscription;
+  StreamSubscription<Duration>? _positionSubscription;
+
+  PlaylistMode _repeatMode = PlaylistMode.none;
+  bool _ended = false;
+  bool _unreliableDuration = false;
+  Duration? _lastPosition;
+  int _lastPlaylistIndex = -1;
+  DateTime _ignorePositionBackstepsUntil = DateTime.fromMillisecondsSinceEpoch(0);
+
+  Duration? _scrubPosition;
+  Uint8List? _scrubFrame;
+  Timer? _scrubPreviewDebounce;
+  Future<void>? _scrubPreviewTask;
+  int _scrubGeneration = 0;
+  bool _resumeAfterScrub = false;
+
 
   // One transform for the full video viewport; gestures and buttons share it.
   final TransformationController _zoomController = TransformationController();
@@ -104,6 +122,37 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void initState() {
     super.initState();
     _zoomController.addListener(_onZoomChanged);
+    _completedSubscription = player.stream.completed.listen((completed) {
+      if (!mounted) return;
+      setState(() {
+        _ended = completed;
+        if (completed) _showControls = true;
+      });
+      if (completed) _hideTimer?.cancel();
+    });
+    _positionSubscription = player.stream.position.listen((position) {
+      if (!mounted || _scrubbing) return;
+      final state = player.state;
+      final index = state.playlist.index;
+      if (index != _lastPlaylistIndex) {
+        _lastPlaylistIndex = index;
+        _lastPosition = null;
+        if (_unreliableDuration) setState(() => _unreliableDuration = false);
+      }
+      final duration = state.duration;
+      final beyond = duration > Duration.zero &&
+          position > duration + const Duration(seconds: 1);
+      // Some malformed files jump their presentation timestamp backwards
+      // even though playback continues: do not portray that as a completed file.
+      final jumpedBack = _lastPosition != null &&
+          _lastPosition! - position > const Duration(seconds: 3) &&
+          state.playing && !state.completed &&
+          DateTime.now().isAfter(_ignorePositionBackstepsUntil);
+      if ((beyond || jumpedBack) && !_unreliableDuration) {
+        setState(() => _unreliableDuration = true);
+      }
+      _lastPosition = position;
+    });
     _playingSubscription = player.stream.playing.listen((playing) {
       if (!mounted) return;
       setState(() {
@@ -183,6 +232,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _scrubPreviewDebounce?.cancel();
+    _scrubGeneration++;
+    _positionSubscription?.cancel();
+    _completedSubscription?.cancel();
     _playingSubscription?.cancel();
     _zoomController.removeListener(_onZoomChanged);
     _zoomController.dispose();
@@ -225,20 +278,81 @@ class _PlayerScreenState extends State<PlayerScreen> {
       files..clear()..addAll(paths);
       error = null;
       _showControls = true;
+      _ended = false;
+      _unreliableDuration = false;
+      _lastPosition = null;
+      _scrubPosition = null;
+      _scrubFrame = null;
+      _scrubbing = false;
+      _lastPlaylistIndex = start < 0 ? 0 : start;
     });
+    _scrubPreviewDebounce?.cancel();
+    _scrubGeneration++;
     _resetZoom(wakeControls: false);
     await player.open(Playlist(
       paths.map((path) => Media(Uri.file(path).toString())).toList(),
       index: start < 0 ? 0 : start,
     ));
+    await player.setPlaylistMode(_repeatMode);
   }
 
   Future<void> jump(int seconds) async {
     final state = player.state;
     final ms = (state.position.inMilliseconds + seconds * 1000)
         .clamp(0, state.duration.inMilliseconds);
+    _ignorePositionBackstepsUntil =
+        DateTime.now().add(const Duration(seconds: 2));
     await player.seek(Duration(milliseconds: ms));
   }
+
+  Future<void> _restartCurrent() async {
+    if (files.isEmpty) return;
+    final originalIndex = player.state.playlist.index;
+    final index = originalIndex.clamp(0, files.length - 1);
+    _scrubPreviewDebounce?.cancel();
+    _scrubGeneration++;
+    setState(() {
+      _ended = false;
+      _unreliableDuration = false;
+      _lastPosition = null;
+      _lastPlaylistIndex = index;
+      _scrubbing = false;
+      _scrubPosition = null;
+      _scrubFrame = null;
+    });
+    _ignorePositionBackstepsUntil =
+        DateTime.now().add(const Duration(seconds: 3));
+    // Re-open to reset demuxer/decoder state. Merely seeking to 00:00
+    // can leave some damaged media stuttering after an EOF.
+    await player.open(Playlist(
+      files.map((path) => Media(Uri.file(path).toString())).toList(),
+      index: index,
+    ));
+    await player.setPlaylistMode(_repeatMode);
+    await player.setRate(speed);
+    _wakeControls();
+  }
+
+  Future<void> _playPause() async {
+    if (_ended || player.state.completed) {
+      await _restartCurrent();
+    } else {
+      await player.playOrPause();
+    }
+  }
+
+  Future<void> _cycleRepeat() async {
+    final next = switch (_repeatMode) {
+      PlaylistMode.none => PlaylistMode.single,
+      PlaylistMode.single => PlaylistMode.loop,
+      PlaylistMode.loop => PlaylistMode.none,
+    };
+    await player.setPlaylistMode(next);
+    if (!mounted) return;
+    setState(() => _repeatMode = next);
+    _wakeControls();
+  }
+
 
   String clock(Duration d) {
     final h = d.inHours;
@@ -247,44 +361,159 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return h > 0 ? '$h:$m:$s' : '$m:$s';
   }
 
+
+  void _beginScrub(double v) {
+    _scrubPreviewDebounce?.cancel();
+    ++_scrubGeneration;
+    _resumeAfterScrub = player.state.playing;
+    setState(() {
+      _scrubbing = true;
+      _scrubPosition = Duration(milliseconds: v.round());
+      _scrubFrame = null;
+      _showControls = true;
+    });
+    _hideTimer?.cancel();
+    player.pause();
+  }
+
+  void _updateScrub(double v) {
+    final target = Duration(milliseconds: v.round());
+    setState(() {
+      _scrubPosition = target;
+      _scrubFrame = null;
+    });
+    _scrubPreviewDebounce?.cancel();
+    final generation = _scrubGeneration;
+    _scrubPreviewDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (mounted && _scrubbing && generation == _scrubGeneration &&
+          _scrubPreviewTask == null) {
+        _scrubPreviewTask = _previewScrubFrame(target, generation);
+      }
+    });
+  }
+
+  Future<void> _previewScrubFrame(Duration target, int generation) async {
+    try {
+      _ignorePositionBackstepsUntil =
+          DateTime.now().add(const Duration(seconds: 3));
+      await player.seek(target);
+      await Future<void>.delayed(const Duration(milliseconds: 180));
+      if (!mounted || !_scrubbing || generation != _scrubGeneration) return;
+      final bytes = await player.screenshot(format: 'image/jpeg');
+      if (mounted && _scrubbing && generation == _scrubGeneration &&
+          _scrubPosition == target) {
+        setState(() => _scrubFrame = bytes);
+      }
+    } catch (_) {
+      // The timestamp preview still displays if a damaged frame fails.
+    } finally {
+      _scrubPreviewTask = null;
+      final latest = _scrubPosition;
+      if (mounted && _scrubbing && generation == _scrubGeneration &&
+          latest != null && latest != target) {
+        _updateScrub(latest.inMilliseconds.toDouble());
+      }
+    }
+  }
+
+  Future<void> _endScrub(double v) async {
+    _scrubPreviewDebounce?.cancel();
+    final generation = _scrubGeneration;
+    final resume = _resumeAfterScrub;
+    final task = _scrubPreviewTask;
+    if (task != null) await task;
+    if (!mounted || generation != _scrubGeneration) return;
+    try {
+      _ignorePositionBackstepsUntil =
+          DateTime.now().add(const Duration(seconds: 3));
+      await player.seek(Duration(milliseconds: v.round()));
+      if (resume) await player.play();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unable to seek here: $e')),
+        );
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _scrubbing = false;
+      _scrubPosition = null;
+      _scrubFrame = null;
+    });
+    _scheduleAutoHide();
+  }
+
   Widget _seekBar() => StreamBuilder<Duration>(
     stream: player.stream.position,
-    initialData: Duration.zero,
+    initialData: player.state.position,
     builder: (context, positionSnapshot) {
-      final position = positionSnapshot.data ?? Duration.zero;
+      final position = positionSnapshot.data ?? player.state.position;
       return StreamBuilder<Duration>(
         stream: player.stream.duration,
-        initialData: Duration.zero,
-        builder: (context, lengthSnapshot) {
-          final length = lengthSnapshot.data ?? Duration.zero;
-          final max = length.inMilliseconds > 0
-              ? length.inMilliseconds.toDouble()
-              : 1.0;
-          return Row(
+        initialData: player.state.duration,
+        builder: (context, durationSnapshot) {
+          final length = durationSnapshot.data ?? player.state.duration;
+          final valid = length > Duration.zero &&
+              !_unreliableDuration &&
+              position <= length + const Duration(seconds: 1);
+          final max = valid ? length.inMilliseconds.toDouble() : 1.0;
+          final displayed = _scrubbing
+              ? (_scrubPosition ?? position)
+              : position;
+          final value = valid
+              ? displayed.inMilliseconds.clamp(0, max.toInt()).toDouble()
+              : 0.0;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Text(clock(position), style: const TextStyle(fontSize: 12)),
-              Expanded(
-                child: Slider(
-                  value: position.inMilliseconds
-                      .clamp(0, max.toInt())
-                      .toDouble(),
-                  max: max,
-                  onChangeStart: (_) {
-                    _scrubbing = true;
-                    _hideTimer?.cancel();
-                  },
-                  onChanged: (files.isEmpty)
-                      ? null
-                      : (value) => player.seek(
-                          Duration(milliseconds: value.toInt()),
-                        ),
-                  onChangeEnd: (_) {
-                    _scrubbing = false;
-                    _scheduleAutoHide();
-                  },
+              if (_scrubbing)
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      height: 88, width: 150,
+                      alignment: Alignment.center,
+                      clipBehavior: Clip.hardEdge,
+                      decoration: BoxDecoration(
+                        color: Colors.black87,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.white38),
+                      ),
+                      child: _scrubFrame == null
+                          ? const Text('Preview loading…',
+                              style: TextStyle(fontSize: 12))
+                          : Image.memory(_scrubFrame!,
+                              fit: BoxFit.contain, gaplessPlayback: true),
+                    ),
+                    const SizedBox(width: 10),
+                    Text(clock(displayed),
+                        style: const TextStyle(fontSize: 17)),
+                  ],
                 ),
+              Row(
+                children: [
+                  Text(clock(displayed),
+                      style: const TextStyle(fontSize: 12)),
+                  Expanded(
+                    child: Slider(
+                      value: value,
+                      max: max,
+                      onChangeStart: valid ? _beginScrub : null,
+                      onChanged: valid ? _updateScrub : null,
+                      onChangeEnd: valid ? _endScrub : null,
+                    ),
+                  ),
+                  Text(valid ? clock(length) : '--:--',
+                      style: const TextStyle(fontSize: 12)),
+                ],
               ),
-              Text(clock(length), style: const TextStyle(fontSize: 12)),
+              if (!valid && files.isNotEmpty)
+                const Text(
+                  'Video timestamps unreliable. Seeking is unavailable.',
+                  style: TextStyle(fontSize: 11, color: Colors.amberAccent),
+                  textAlign: TextAlign.center,
+                ),
             ],
           );
         },
@@ -316,7 +545,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         tooltip: _isPlaying ? 'Pause' : 'Play',
         onPressed: files.isEmpty ? null : () {
           _wakeControls();
-          player.playOrPause();
+          _playPause();
         },
         icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
       ),
@@ -336,6 +565,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
           player.next();
         },
         icon: const Icon(Icons.skip_next),
+      ),
+      IconButton(
+        tooltip: 'Replay from the beginning',
+        onPressed: files.isEmpty ? null : _restartCurrent,
+        icon: const Icon(Icons.replay),
       ),
     ],
   );
@@ -357,6 +591,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
           if (value == null) return;
           _changeSpeed(value);
         },
+      ),
+      IconButton(
+        tooltip: switch (_repeatMode) {
+          PlaylistMode.none => 'Repeat Off',
+          PlaylistMode.single => 'Repeat One',
+          PlaylistMode.loop => 'Repeat All',
+        },
+        onPressed: files.isEmpty ? null : _cycleRepeat,
+        icon: Icon(
+          _repeatMode == PlaylistMode.single
+              ? Icons.repeat_one
+              : Icons.repeat,
+          color: _repeatMode == PlaylistMode.none
+              ? Colors.white70
+              : Colors.tealAccent,
+        ),
       ),
       IconButton(
         tooltip: 'Rotate video 90 degrees',
