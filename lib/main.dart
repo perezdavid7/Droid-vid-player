@@ -101,98 +101,178 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return h > 0 ? '$h:$m:$s' : '$m:$s';
   }
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: const Text('Droid Vid Player'),
-      actions: [
-        IconButton(
-          onPressed: openFiles, tooltip: 'Open local videos',
-          icon: const Icon(Icons.folder_open),
-        ),
-      ],
-    ),
-    body: Column(children: [
-      Expanded(child: ColoredBox(
-        color: Colors.black,
-        child: files.isEmpty
-            ? const Center(child: Text('Open a video to begin'))
-            : ClipRect(child: RotatedBox(
-                quarterTurns: turns,
-                child: Video(
-                  controller: video,
-                  fit: fill ? BoxFit.cover : BoxFit.contain,
-                  controls: NoVideoControls,
-                ),
-              )),
-      )),
-      if (error != null) Padding(
-        padding: const EdgeInsets.all(8), child: Text(error!, style: const TextStyle(color: Colors.redAccent)),
-      ),
-      StreamBuilder<Duration>(
-        stream: player.stream.position,
+  // The controls are deliberately outside the video body. This reserves space
+  // for them even on Android's edge-to-edge layouts and keeps tap targets clear
+  // of the system Home / Back navigation area.
+  Widget _seekBar() => StreamBuilder<Duration>(
+    stream: player.stream.position,
+    initialData: Duration.zero,
+    builder: (context, positionSnapshot) {
+      final position = positionSnapshot.data ?? Duration.zero;
+      return StreamBuilder<Duration>(
+        stream: player.stream.duration,
         initialData: Duration.zero,
-        builder: (context, positionSnapshot) {
-          final position = positionSnapshot.data ?? Duration.zero;
-          return StreamBuilder<Duration>(
-            stream: player.stream.duration,
-            initialData: Duration.zero,
-            builder: (context, lengthSnapshot) {
-              final length = lengthSnapshot.data ?? Duration.zero;
-              final max = length.inMilliseconds > 0 ? length.inMilliseconds.toDouble() : 1.0;
-              return Row(children: [
-                Text(clock(position)),
-                Expanded(child: Slider(
-                  value: position.inMilliseconds.clamp(0, max.toInt()).toDouble(),
-                  max: max,
-                  onChanged: files.isEmpty ? null : (v) =>
-                      player.seek(Duration(milliseconds: v.toInt())),
-                )),
-                Text(clock(length)),
-              ]);
-            },
-          );
+        builder: (context, lengthSnapshot) {
+          final length = lengthSnapshot.data ?? Duration.zero;
+          final max = length.inMilliseconds > 0
+              ? length.inMilliseconds.toDouble()
+              : 1.0;
+          return Row(children: [
+            Text(clock(position), style: const TextStyle(fontSize: 12)),
+            Expanded(
+              child: Slider(
+                value: position.inMilliseconds.clamp(0, max.toInt()).toDouble(),
+                max: max,
+                onChanged: files.isEmpty
+                    ? null
+                    : (value) => player.seek(
+                        Duration(milliseconds: value.toInt()),
+                      ),
+              ),
+            ),
+            Text(clock(length), style: const TextStyle(fontSize: 12)),
+          ]);
         },
+      );
+    },
+  );
+
+  Widget _transportControls() => Row(
+    mainAxisSize: MainAxisSize.min,
+    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+    children: [
+      IconButton(
+        tooltip: 'Previous video',
+        onPressed: files.isEmpty ? null : player.previous,
+        icon: const Icon(Icons.skip_previous),
       ),
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(children: [
-          IconButton(onPressed: files.isEmpty ? null : player.previous, icon: const Icon(Icons.skip_previous)),
-          IconButton(onPressed: files.isEmpty ? null : () => jump(-10), icon: const Icon(Icons.replay_10)),
-          StreamBuilder<bool>(
-            stream: player.stream.playing,
-            initialData: false,
-            builder: (context, snapshot) => IconButton.filled(
-              onPressed: files.isEmpty ? null : player.playOrPause,
-              icon: Icon(snapshot.data == true ? Icons.pause : Icons.play_arrow),
+      IconButton(
+        tooltip: 'Back 10 seconds',
+        onPressed: files.isEmpty ? null : () => jump(-10),
+        icon: const Icon(Icons.replay_10),
+      ),
+      StreamBuilder<bool>(
+        stream: player.stream.playing,
+        initialData: false,
+        builder: (context, snapshot) => IconButton.filled(
+          tooltip: snapshot.data == true ? 'Pause' : 'Play',
+          onPressed: files.isEmpty ? null : player.playOrPause,
+          icon: Icon(snapshot.data == true ? Icons.pause : Icons.play_arrow),
+        ),
+      ),
+      IconButton(
+        tooltip: 'Forward 10 seconds',
+        onPressed: files.isEmpty ? null : () => jump(10),
+        icon: const Icon(Icons.forward_10),
+      ),
+      IconButton(
+        tooltip: 'Next video',
+        onPressed: files.isEmpty ? null : player.next,
+        icon: const Icon(Icons.skip_next),
+      ),
+    ],
+  );
+
+  Widget _displayControls() => Row(
+    mainAxisSize: MainAxisSize.min,
+    mainAxisAlignment: MainAxisAlignment.center,
+    children: [
+      DropdownButton<double>(
+        value: speed,
+        items: [0.5, 1.0, 1.5, 2.0, 4.0]
+            .map((s) => DropdownMenuItem(value: s, child: Text('${s}x')))
+            .toList(),
+        onChanged: files.isEmpty
+            ? null
+            : (value) {
+                if (value == null) return;
+                setState(() => speed = value);
+                player.setRate(value);
+              },
+      ),
+      IconButton(
+        tooltip: 'Rotate video 90 degrees',
+        onPressed: () => setState(() => turns = (turns + 1) % 4),
+        icon: const Icon(Icons.rotate_right),
+      ),
+      IconButton(
+        tooltip: fill ? 'Fit video to screen' : 'Fill screen',
+        onPressed: () => setState(() => fill = !fill),
+        icon: const Icon(Icons.fit_screen),
+      ),
+    ],
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= 600;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Droid Vid Player'),
+        actions: [
+          IconButton(
+            onPressed: openFiles,
+            tooltip: 'Open local videos',
+            icon: const Icon(Icons.folder_open),
+          ),
+        ],
+      ),
+      body: Column(children: [
+        Expanded(
+          child: ColoredBox(
+            color: Colors.black,
+            child: files.isEmpty
+                ? const Center(child: Text('Open a video to begin'))
+                : ClipRect(
+                    child: RotatedBox(
+                      quarterTurns: turns,
+                      child: Video(
+                        controller: video,
+                        fit: fill ? BoxFit.cover : BoxFit.contain,
+                        controls: NoVideoControls,
+                      ),
+                    ),
+                  ),
+          ),
+        ),
+        if (error != null)
+          Padding(
+            padding: const EdgeInsets.all(8),
+            child: Text(error!, style: const TextStyle(color: Colors.redAccent)),
+          ),
+      ]),
+      bottomNavigationBar: SafeArea(
+        top: false,
+        // Extra clearance in addition to the Android system navigation inset.
+        minimum: const EdgeInsets.fromLTRB(8, 6, 8, 16),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainerHigh,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _seekBar(),
+                if (wide)
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      _transportControls(),
+                      _displayControls(),
+                    ],
+                  )
+                else ...[
+                  _transportControls(),
+                  _displayControls(),
+                ],
+              ],
             ),
           ),
-          IconButton(onPressed: files.isEmpty ? null : () => jump(10), icon: const Icon(Icons.forward_10)),
-          IconButton(onPressed: files.isEmpty ? null : player.next, icon: const Icon(Icons.skip_next)),
-          DropdownButton<double>(
-            value: speed,
-            items: [0.5, 1.0, 1.5, 2.0, 4.0].map(
-              (s) => DropdownMenuItem(value: s, child: Text('${s}x')),
-            ).toList(),
-            onChanged: files.isEmpty ? null : (value) {
-              if (value == null) return;
-              setState(() => speed = value);
-              player.setRate(value);
-            },
-          ),
-          IconButton(
-            tooltip: 'Rotate 90 degrees',
-            onPressed: () => setState(() => turns = (turns + 1) % 4),
-            icon: const Icon(Icons.rotate_right),
-          ),
-          IconButton(
-            tooltip: 'Fit or fill screen',
-            onPressed: () => setState(() => fill = !fill),
-            icon: const Icon(Icons.fit_screen),
-          ),
-        ]),
+        ),
       ),
-      const SizedBox(height: 8),
-    ]),
-  );
+    );
+  }
 }
