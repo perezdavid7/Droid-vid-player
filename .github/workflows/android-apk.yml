@@ -36,6 +36,8 @@ jobs:
         run: flutter --version
       - name: Generate Android runner
         run: flutter create --platforms=android --project-name=droid_vid_player .
+      - name: Remove Flutter template test (not applicable to custom app)
+        run: rm -f test/widget_test.dart
       - name: Fetch packages
         run: flutter pub get
       - name: Analyze
