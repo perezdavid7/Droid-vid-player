@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path/path.dart' as p;
@@ -36,6 +38,85 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool fill = false;
   int turns = 0;
   String? error;
+  bool _isPlaying = false;
+  bool _showControls = true;
+  bool _fullScreen = false;
+  bool _scrubbing = false;
+  Timer? _hideTimer;
+  StreamSubscription<bool>? _playingSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _playingSubscription = player.stream.playing.listen((playing) {
+      if (!mounted) return;
+      setState(() {
+        _isPlaying = playing;
+        if (!playing) _showControls = true;
+      });
+      _scheduleAutoHide();
+    });
+  }
+
+  void _scheduleAutoHide() {
+    _hideTimer?.cancel();
+    if (!_isPlaying || !_showControls || _scrubbing || files.isEmpty) {
+      return;
+    }
+    _hideTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted && _isPlaying && !_scrubbing) {
+        setState(() => _showControls = false);
+      }
+    });
+  }
+
+  void _wakeControls() {
+    if (!_showControls) {
+      setState(() => _showControls = true);
+    }
+    _scheduleAutoHide();
+  }
+
+  void _tapVideo() {
+    if (!_showControls) {
+      _wakeControls();
+    } else if (_isPlaying) {
+      _hideTimer?.cancel();
+      setState(() => _showControls = false);
+    }
+  }
+
+  Future<void> _toggleFullScreen() async {
+    final next = !_fullScreen;
+    try {
+      await SystemChrome.setEnabledSystemUIMode(
+        next ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+      );
+    } catch (_) {
+      // A desktop host can ignore Android-specific system UI modes.
+    }
+    if (!mounted) return;
+    setState(() {
+      _fullScreen = next;
+      _showControls = true;
+    });
+    _scheduleAutoHide();
+  }
+
+  Future<void> _changeSpeed(double value) async {
+    try {
+      await player.setRate(value);
+      if (!mounted) return;
+      setState(() => speed = value);
+      _wakeControls();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unable to set ${value}x speed: $e')),
+      );
+    }
+  }
+
 
   static const extensions = <String>{
     '.mpg', '.mpeg', '.m2v', '.mkv', '.mov', '.mp4',
@@ -45,6 +126,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
+    _hideTimer?.cancel();
+    _playingSubscription?.cancel();
+    if (_fullScreen) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
     player.dispose();
     super.dispose();
   }
@@ -80,6 +166,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() {
       files..clear()..addAll(paths);
       error = null;
+      _showControls = true;
     });
     await player.open(Playlist(
       paths.map((path) => Media(Uri.file(path).toString())).toList(),
@@ -101,9 +188,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return h > 0 ? '$h:$m:$s' : '$m:$s';
   }
 
-  // The controls are deliberately outside the video body. This reserves space
-  // for them even on Android's edge-to-edge layouts and keeps tap targets clear
-  // of the system Home / Back navigation area.
   Widget _seekBar() => StreamBuilder<Duration>(
     stream: player.stream.position,
     initialData: Duration.zero,
@@ -117,162 +201,265 @@ class _PlayerScreenState extends State<PlayerScreen> {
           final max = length.inMilliseconds > 0
               ? length.inMilliseconds.toDouble()
               : 1.0;
-          return Row(children: [
-            Text(clock(position), style: const TextStyle(fontSize: 12)),
-            Expanded(
-              child: Slider(
-                value: position.inMilliseconds.clamp(0, max.toInt()).toDouble(),
-                max: max,
-                onChanged: files.isEmpty
-                    ? null
-                    : (value) => player.seek(
-                        Duration(milliseconds: value.toInt()),
-                      ),
+          return Row(
+            children: [
+              Text(clock(position), style: const TextStyle(fontSize: 12)),
+              Expanded(
+                child: Slider(
+                  value: position.inMilliseconds
+                      .clamp(0, max.toInt())
+                      .toDouble(),
+                  max: max,
+                  onChangeStart: (_) {
+                    _scrubbing = true;
+                    _hideTimer?.cancel();
+                  },
+                  onChanged: (files.isEmpty)
+                      ? null
+                      : (value) => player.seek(
+                          Duration(milliseconds: value.toInt()),
+                        ),
+                  onChangeEnd: (_) {
+                    _scrubbing = false;
+                    _scheduleAutoHide();
+                  },
+                ),
               ),
-            ),
-            Text(clock(length), style: const TextStyle(fontSize: 12)),
-          ]);
+              Text(clock(length), style: const TextStyle(fontSize: 12)),
+            ],
+          );
         },
       );
     },
   );
 
-  Widget _transportControls() => Row(
+  Widget _transportButtons() => Row(
     mainAxisSize: MainAxisSize.min,
-    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
     children: [
       IconButton(
         tooltip: 'Previous video',
-        onPressed: files.isEmpty ? null : player.previous,
+        onPressed: files.isEmpty ? null : () {
+          _wakeControls();
+          player.previous();
+        },
         icon: const Icon(Icons.skip_previous),
       ),
       IconButton(
         tooltip: 'Back 10 seconds',
-        onPressed: files.isEmpty ? null : () => jump(-10),
+        onPressed: files.isEmpty ? null : () {
+          _wakeControls();
+          jump(-10);
+        },
         icon: const Icon(Icons.replay_10),
       ),
-      StreamBuilder<bool>(
-        stream: player.stream.playing,
-        initialData: false,
-        builder: (context, snapshot) => IconButton.filled(
-          tooltip: snapshot.data == true ? 'Pause' : 'Play',
-          onPressed: files.isEmpty ? null : player.playOrPause,
-          icon: Icon(snapshot.data == true ? Icons.pause : Icons.play_arrow),
-        ),
+      IconButton.filled(
+        tooltip: _isPlaying ? 'Pause' : 'Play',
+        onPressed: files.isEmpty ? null : () {
+          _wakeControls();
+          player.playOrPause();
+        },
+        icon: Icon(_isPlaying ? Icons.pause : Icons.play_arrow),
       ),
       IconButton(
         tooltip: 'Forward 10 seconds',
-        onPressed: files.isEmpty ? null : () => jump(10),
+        onPressed: files.isEmpty ? null : () {
+          _wakeControls();
+          jump(10);
+        },
         icon: const Icon(Icons.forward_10),
       ),
       IconButton(
         tooltip: 'Next video',
-        onPressed: files.isEmpty ? null : player.next,
+        onPressed: files.isEmpty ? null : () {
+          _wakeControls();
+          player.next();
+        },
         icon: const Icon(Icons.skip_next),
       ),
     ],
   );
 
-  Widget _displayControls() => Row(
+  Widget _displayButtons() => Row(
     mainAxisSize: MainAxisSize.min,
-    mainAxisAlignment: MainAxisAlignment.center,
     children: [
       DropdownButton<double>(
         value: speed,
-        items: [0.5, 1.0, 1.5, 2.0, 4.0]
-            .map((s) => DropdownMenuItem(value: s, child: Text('${s}x')))
+        dropdownColor: const Color(0xFF24212A),
+        underline: const SizedBox.shrink(),
+        items: const [0.1, 0.2, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0]
+            .map((value) => DropdownMenuItem<double>(
+                  value: value,
+                  child: Text('${value}x', style: TextStyle(fontSize: 14)),
+                ))
             .toList(),
-        onChanged: files.isEmpty
-            ? null
-            : (value) {
-                if (value == null) return;
-                setState(() => speed = value);
-                player.setRate(value);
-              },
+        onChanged: files.isEmpty ? null : (value) {
+          if (value == null) return;
+          _changeSpeed(value);
+        },
       ),
       IconButton(
         tooltip: 'Rotate video 90 degrees',
-        onPressed: () => setState(() => turns = (turns + 1) % 4),
+        onPressed: () {
+          setState(() => turns = (turns + 1) % 4);
+          _wakeControls();
+        },
         icon: const Icon(Icons.rotate_right),
       ),
       IconButton(
-        tooltip: fill ? 'Fit video to screen' : 'Fill screen',
-        onPressed: () => setState(() => fill = !fill),
-        icon: const Icon(Icons.fit_screen),
+        tooltip: fill ? 'Fit video' : 'Fill screen (crop to fit)',
+        onPressed: () {
+          setState(() => fill = !fill);
+          _wakeControls();
+        },
+        icon: Icon(fill ? Icons.fit_screen : Icons.zoom_out_map),
+      ),
+      IconButton(
+        tooltip: _fullScreen ? 'Exit full screen' : 'Full screen',
+        onPressed: _toggleFullScreen,
+        icon: Icon(_fullScreen ? Icons.fullscreen_exit : Icons.fullscreen),
       ),
     ],
   );
 
-  @override
-  Widget build(BuildContext context) {
-    final wide = MediaQuery.sizeOf(context).width >= 600;
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Droid Vid Player'),
-        actions: [
-          IconButton(
-            onPressed: openFiles,
-            tooltip: 'Open local videos',
-            icon: const Icon(Icons.folder_open),
-          ),
-        ],
+  Widget _overlayToolbar() => SafeArea(
+    bottom: false,
+    minimum: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+    child: DecoratedBox(
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.50),
+        borderRadius: BorderRadius.circular(14),
       ),
-      body: Column(children: [
-        Expanded(
-          child: ColoredBox(
-            color: Colors.black,
-            child: files.isEmpty
-                ? const Center(child: Text('Open a video to begin'))
-                : ClipRect(
-                    child: RotatedBox(
-                      quarterTurns: turns,
-                      child: Video(
-                        controller: video,
-                        fit: fill ? BoxFit.cover : BoxFit.contain,
-                        controls: NoVideoControls,
-                      ),
-                    ),
-                  ),
-          ),
+      child: Row(children: [
+        const SizedBox(width: 10),
+        const Expanded(
+          child: Text('Droid Vid Player',
+              maxLines: 1, overflow: TextOverflow.ellipsis),
         ),
-        if (error != null)
-          Padding(
-            padding: const EdgeInsets.all(8),
-            child: Text(error!, style: const TextStyle(color: Colors.redAccent)),
-          ),
+        IconButton(
+          tooltip: 'Open video',
+          onPressed: () {
+            _wakeControls();
+            openFiles();
+          },
+          icon: const Icon(Icons.folder_open),
+        ),
+        IconButton(
+          tooltip: _fullScreen ? 'Leave full screen' : 'Full screen',
+          onPressed: _toggleFullScreen,
+          icon: Icon(_fullScreen ? Icons.fullscreen_exit : Icons.fullscreen),
+        ),
       ]),
-      bottomNavigationBar: SafeArea(
-        top: false,
-        // Extra clearance in addition to the Android system navigation inset.
-        minimum: const EdgeInsets.fromLTRB(8, 6, 8, 16),
+    ),
+  );
+
+  Widget _overlayControls(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= 680;
+    return SafeArea(
+      top: false,
+      minimum: const EdgeInsets.fromLTRB(8, 0, 8, 24),
+      child: Align(
+        alignment: Alignment.bottomCenter,
         child: DecoratedBox(
           decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surfaceContainerHigh,
+            color: Colors.black.withValues(alpha: 0.70),
             borderRadius: BorderRadius.circular(16),
           ),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _seekBar(),
-                if (wide)
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      _transportControls(),
-                      _displayControls(),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: DefaultTextStyle.merge(
+              style: const TextStyle(color: Colors.white),
+              child: IconTheme(
+                data: const IconThemeData(color: Colors.white),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _seekBar(),
+                    if (wide)
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [_transportButtons(), _displayButtons()],
+                      )
+                    else ...[
+                      _transportButtons(),
+                      _displayButtons(),
                     ],
-                  )
-                else ...[
-                  _transportControls(),
-                  _displayControls(),
-                ],
-              ],
+                  ],
+                ),
+              ),
             ),
           ),
         ),
       ),
     );
   }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    backgroundColor: Colors.black,
+    appBar: _fullScreen
+        ? null
+        : AppBar(
+            title: const Text('Droid Vid Player'),
+            actions: [
+              IconButton(
+                onPressed: openFiles,
+                tooltip: 'Open local videos',
+                icon: const Icon(Icons.folder_open),
+              ),
+              IconButton(
+                onPressed: _toggleFullScreen,
+                tooltip: 'Full screen',
+                icon: const Icon(Icons.fullscreen),
+              ),
+            ],
+          ),
+    body: Stack(
+      fit: StackFit.expand,
+      children: [
+        ColoredBox(
+          color: Colors.black,
+          child: files.isEmpty
+              ? const Center(child: Text('Open a video to begin'))
+              : ClipRect(
+                  child: RotatedBox(
+                    quarterTurns: turns,
+                    child: Video(
+                      controller: video,
+                      fit: fill ? BoxFit.cover : BoxFit.contain,
+                      controls: NoVideoControls,
+                    ),
+                  ),
+                ),
+        ),
+        if (files.isNotEmpty)
+          Positioned.fill(
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: _tapVideo,
+            ),
+          ),
+        if (_showControls && files.isNotEmpty)
+          Positioned(left: 0, top: 0, right: 0,
+              child: _overlayToolbar()),
+        if (_showControls && files.isNotEmpty)
+          Positioned(left: 0, right: 0, bottom: 0,
+              child: _overlayControls(context)),
+        if (error != null)
+          Positioned(
+            left: 12, right: 12,
+            top: _fullScreen ? 90 : 12,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.red.shade900,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Text(error!),
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
 }
