@@ -7,11 +7,13 @@ on:
     paths:
       - 'lib/**'
       - 'pubspec.yaml'
+      - 'scripts/**'
       - '.github/workflows/android-apk.yml'
   pull_request:
     paths:
       - 'lib/**'
       - 'pubspec.yaml'
+      - 'scripts/**'
       - '.github/workflows/android-apk.yml'
 
 jobs:
@@ -36,18 +38,48 @@ jobs:
         run: flutter --version
       - name: Generate Android runner
         run: flutter create --platforms=android --project-name=droid_vid_player .
-      - name: Remove Flutter template test (not applicable to custom app)
+      - name: Remove Flutter template test
         run: rm -f test/widget_test.dart
       - name: Fetch packages
         run: flutter pub get
       - name: Analyze
         run: flutter analyze
-      - name: Build APK (unsigned release-equivalent debug build for testing)
-        run: flutter build apk --debug
-      - name: Upload installable test APK
+      - name: Restore private app signing certificate
+        shell: bash
+        env:
+          SIGNING_JKS_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SIGNING_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [[ -n "$SIGNING_JKS_BASE64" && -n "$SIGNING_PASSWORD" && -n "$SIGNING_ALIAS" ]]; then
+            printf '%s' "$SIGNING_JKS_BASE64" | base64 --decode > android/app/droid-release.jks
+            chmod 600 android/app/droid-release.jks
+            {
+              printf 'storePassword=%s\n' "$SIGNING_PASSWORD"
+              printf 'keyPassword=%s\n' "$SIGNING_PASSWORD"
+              printf 'keyAlias=%s\n' "$SIGNING_ALIAS"
+              printf 'storeFile=droid-release.jks\n'
+            } > android/key.properties
+            chmod 600 android/key.properties
+            echo 'DROID_SIGNING_CONFIGURED=true' >> "$GITHUB_ENV"
+            echo 'Stable signing key present: building an updateable release APK.'
+          else
+            echo 'DROID_SIGNING_CONFIGURED=false' >> "$GITHUB_ENV"
+            echo '::warning::Persistent signing not configured. Debug APK will not update prior builds with other signing keys.'
+          fi
+      - name: Build signed APK (release) or temporary debug APK
+        shell: bash
+        run: |
+          if [[ "$DROID_SIGNING_CONFIGURED" == 'true' ]]; then
+            python3 scripts/configure_android_signing.py
+            flutter build apk --release --build-number="$GITHUB_RUN_NUMBER"
+          else
+            flutter build apk --debug --build-number="$GITHUB_RUN_NUMBER"
+          fi
+      - name: Upload installable APK
         uses: actions/upload-artifact@v4
         with:
           name: Droid-Vid-Player-Android-APK
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          path: build/app/outputs/flutter-apk/app-*.apk
           if-no-files-found: error
           retention-days: 14
