@@ -1010,6 +1010,46 @@ class _PlayerScreenState extends State<PlayerScreen> {
     },
   );
 
+  Widget _shuttleIndicator() => Positioned(
+    top: 18,
+    left: 0,
+    right: 0,
+    child: IgnorePointer(
+      child: Center(
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.76),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: StreamBuilder<Duration>(
+              stream: player.stream.position,
+              initialData: player.state.position,
+              builder: (context, snapshot) => Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _shuttleWarning ??
+                      (_shuttleDirection < 0
+                          ? '◀◀ Rewind ${_shuttleRate.toStringAsFixed(1)}×'
+                          : _shuttleDirection > 0
+                              ? 'Fast forward ${_shuttleRate.toStringAsFixed(1)}× ▶▶'
+                              : 'Swipe left or right'),
+                    style: const TextStyle(fontSize: 15, color: Colors.white),
+                  ),
+                  Text(clock(snapshot.data ?? player.state.position),
+                      style: const TextStyle(fontSize: 20,
+                          color: Colors.white, fontWeight: FontWeight.bold)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
   Widget _overlayToolbar() => SafeArea(
     bottom: false,
     minimum: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -1098,20 +1138,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
     appBar: _fullScreen
         ? null
         : AppBar(
-            title: const Text('Droid Vid Player'),
+            backgroundColor: _shuttling ? Colors.black : null,
+            title: _shuttling
+                ? const SizedBox.shrink()
+                : const Text('Droid Vid Player'),
             actions: [
-              IconButton(
+              if (!_shuttling) IconButton(
                 onPressed: openFiles,
                 tooltip: 'Open local videos',
                 icon: const Icon(Icons.folder_open),
               ),
-              if (files.isNotEmpty)
+              if (files.isNotEmpty && !_shuttling)
                 IconButton(
                   tooltip: 'Recover & Record current video',
                   onPressed: _openRecovery,
                   icon: const Icon(Icons.auto_fix_high),
                 ),
-              IconButton(
+              if (!_shuttling) IconButton(
                 onPressed: _toggleFullScreen,
                 tooltip: 'Full screen',
                 icon: const Icon(Icons.fullscreen),
@@ -1127,10 +1170,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
               ? const Center(child: Text('Open a video to begin'))
               : _videoWithGestures(),
         ),
-        if (_showControls && files.isNotEmpty)
+        if (_shuttling) _shuttleIndicator(),
+        if (_showControls && !_shuttling && files.isNotEmpty)
           Positioned(left: 0, top: 0, right: 0,
               child: _overlayToolbar()),
-        if (_showControls && files.isNotEmpty)
+        if (_showControls && !_shuttling && files.isNotEmpty)
           Positioned(left: 0, right: 0, bottom: 0,
               child: _overlayControls(context)),
         if (error != null)
