@@ -62,6 +62,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _seekInProgress = false;
   double _swipeTargetMilliseconds = 0;
   DateTime? _lastSwipeUpdate;
+  Timer? _liveScrubTimer;
+  Future<void>? _liveScrubTask;
+  Future<void>? _scrubPauseTask;
+  Duration? _pendingLiveScrubTarget;
+  bool _liveScrubFailed = false;
+  DateTime _lastLiveScrubSeek = DateTime.fromMillisecondsSinceEpoch(0);
+  static const _liveScrubInterval = Duration(milliseconds: 220);
 
 
 
@@ -242,6 +249,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _cancelLiveScrubQueue();
     _scrubGeneration++;
     _positionSubscription?.cancel();
     _completedSubscription?.cancel();
@@ -321,6 +329,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _seekInProgress = false;
       _lastPlaylistIndex = start < 0 ? 0 : start;
     });
+    _cancelLiveScrubQueue();
     _scrubGeneration++;
     _resetZoom(wakeControls: false);
     await player.open(Playlist(
@@ -345,6 +354,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (files.isEmpty) return;
     final originalIndex = player.state.playlist.index;
     final index = originalIndex.clamp(0, files.length - 1);
+    _cancelLiveScrubQueue();
     _scrubGeneration++;
     setState(() {
       _ended = false;
@@ -397,12 +407,30 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
 
-  // Scrubbing is deliberately lightweight: never seek/decode an image while
-  // the finger is moving. The old repeated seek + screenshot pipeline could
-  // stall mpv and prevent the final seek from completing on malformed files.
+
+  // Live scrubbing previews *actual* frames on the video, rather than a
+  // separate JPEG screenshot. Native seeks are serialized and rate limited.
+  // The latest position wins: no huge decoder seek queue can build up.
+  void _cancelLiveScrubQueue() {
+    _liveScrubTimer?.cancel();
+    _liveScrubTimer = null;
+    _pendingLiveScrubTarget = null;
+  }
+
+  Future<void> _pauseForScrub(int generation) async {
+    try {
+      await player.pause().timeout(const Duration(seconds: 3));
+    } catch (_) {
+      if (generation == _scrubGeneration) _liveScrubFailed = true;
+    }
+  }
+
   void _beginScrub(double v) {
-    if (_seekInProgress) return;
-    ++_scrubGeneration;
+    if (_seekInProgress || _unreliableDuration || _scrubbing) return;
+    final generation = ++_scrubGeneration;
+    _cancelLiveScrubQueue();
+    _liveScrubFailed = false;
+    _lastLiveScrubSeek = DateTime.now().subtract(_liveScrubInterval);
     _resumeAfterScrub = player.state.playing;
     setState(() {
       _scrubbing = true;
@@ -410,12 +438,66 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _showControls = true;
     });
     _hideTimer?.cancel();
-    player.pause();
+    _scrubPauseTask = _pauseForScrub(generation);
   }
 
   void _updateScrub(double v) {
-    if (!_scrubbing) return;
-    setState(() => _scrubPosition = Duration(milliseconds: v.round()));
+    if (!_scrubbing || _seekInProgress) return;
+    final target = Duration(milliseconds: v.round());
+    setState(() => _scrubPosition = target);
+    if (!_liveScrubFailed) {
+      _pendingLiveScrubTarget = target;
+      _scheduleLiveScrub();
+    }
+  }
+
+  void _scheduleLiveScrub() {
+    if (!_scrubbing || _seekInProgress || _liveScrubFailed ||
+        _liveScrubTimer != null || _liveScrubTask != null ||
+        _pendingLiveScrubTarget == null) {
+      return;
+    }
+    final elapsed = DateTime.now().difference(_lastLiveScrubSeek);
+    final remaining = _liveScrubInterval - elapsed;
+    _liveScrubTimer = Timer(
+      remaining.isNegative ? Duration.zero : remaining,
+      () {
+        _liveScrubTimer = null;
+        if (!_scrubbing || _seekInProgress || _liveScrubFailed ||
+            _liveScrubTask != null) {
+          return;
+        }
+        final target = _pendingLiveScrubTarget;
+        if (target == null) return;
+        _pendingLiveScrubTarget = null;
+        _lastLiveScrubSeek = DateTime.now();
+        _liveScrubTask = _previewLiveScrub(target, _scrubGeneration);
+      },
+    );
+  }
+
+  Future<void> _previewLiveScrub(Duration target, int generation) async {
+    try {
+      await _scrubPauseTask;
+      if (!mounted || generation != _scrubGeneration ||
+          _liveScrubFailed || !_scrubbing) {
+        return;
+      }
+      _ignorePositionBackstepsUntil =
+          DateTime.now().add(const Duration(seconds: 5));
+      // A seek on the paused video renders the decoded frame itself. Never
+      // request screenshots or start another seek before this one finishes.
+      await player.seek(target).timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // A malformed recording may not support seeking. Stop preview requests,
+      // retaining the ability to use forward-only Recover & Record.
+      if (generation == _scrubGeneration) _liveScrubFailed = true;
+    } finally {
+      _liveScrubTask = null;
+      if (mounted && generation == _scrubGeneration) {
+        _scheduleLiveScrub();
+      }
+    }
   }
 
   void _beginVideoSwipe(DragStartDetails details) {
@@ -435,16 +517,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final elapsed = now.difference(_lastSwipeUpdate!).inMicroseconds / 1000000.0;
     _lastSwipeUpdate = now;
     final dx = details.delta.dx;
-    final pixelsPerSecond = dx.abs() / elapsed.clamp(0.008, 0.3);
-    // Moving slowly advances a fraction of a second per pixel. A quicker
-    // swipe accelerates, allowing large jumps without a long gesture.
-    final secondsPerPixel = pixelsPerSecond < 100
-        ? 0.12
-        : pixelsPerSecond < 350
-            ? 0.5
-            : pixelsPerSecond < 750
-                ? 1.8
-                : 4.5;
+    final speed = dx.abs() / elapsed.clamp(0.008, 0.3);
+    // Smooth velocity curve, avoiding abrupt jump thresholds. Very slow drags
+    // move a few frames; quick swipes can still skip large distances.
+    final secondsPerPixel =
+        (0.025 + (speed / 220) * (speed / 220) * 0.11).clamp(0.025, 2.5);
     final max = player.state.duration.inMilliseconds.toDouble();
     _swipeTargetMilliseconds = (_swipeTargetMilliseconds +
         dx * secondsPerPixel * 1000).clamp(0.0, max).toDouble();
@@ -454,7 +531,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void _endVideoSwipe(DragEndDetails details) {
     if (!_scrubbing || _lastSwipeUpdate == null) return;
     _lastSwipeUpdate = null;
-    _endScrub(_swipeTargetMilliseconds);
+    unawaited(_endScrub(_swipeTargetMilliseconds));
   }
 
   Future<void> _endScrub(double v) async {
@@ -462,19 +539,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final generation = _scrubGeneration;
     final resume = _resumeAfterScrub;
     final target = Duration(milliseconds: v.round());
-
-    // Clear the dragging UI before any potentially slow native operation.
-    setState(() {
-      _scrubbing = false;
-      _scrubPosition = null;
-      _seekInProgress = true;
-    });
+    _cancelLiveScrubQueue();
+    setState(() => _seekInProgress = true);
 
     try {
+      // Complete the in-flight preview *before* the final precise seek.
+      // A timeout never causes a second native seek to be queued.
+      await _liveScrubTask?.timeout(const Duration(seconds: 4));
+      await _scrubPauseTask?.timeout(const Duration(seconds: 4));
+      if (_liveScrubFailed) {
+        throw const TimeoutException('Live preview could not seek this file');
+      }
+      if (!mounted || generation != _scrubGeneration) return;
       _ignorePositionBackstepsUntil =
           DateTime.now().add(const Duration(seconds: 5));
-      // Exactly one seek per gesture; don't queue screenshots behind it.
-      // This timeout releases the UI but cannot forcibly cancel native mpv I/O.
       await player.seek(target).timeout(const Duration(seconds: 5));
       if (!mounted || generation != _scrubGeneration) return;
       if (resume) {
@@ -482,24 +560,28 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     } on TimeoutException {
       if (mounted && generation == _scrubGeneration) {
-        // Stop further seek attempts on this input until a new video is loaded.
         setState(() => _unreliableDuration = true);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text(
-            'This video is taking too long to seek. '
-            'Further seeking is disabled to protect playback.',
+            'This video cannot scrub reliably. Seeking has been disabled; '
+            'try Recover & Record to create a seekable copy.',
           )),
         );
       }
     } catch (e) {
       if (mounted && generation == _scrubGeneration) {
+        setState(() => _unreliableDuration = true);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Unable to seek here: $e')),
+          SnackBar(content: Text('Scrubbing failed: $e')),
         );
       }
     } finally {
       if (mounted && generation == _scrubGeneration) {
-        setState(() => _seekInProgress = false);
+        setState(() {
+          _scrubbing = false;
+          _scrubPosition = null;
+          _seekInProgress = false;
+        });
         _scheduleAutoHide();
       }
     }
@@ -525,7 +607,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           final value = valid
               ? displayed.inMilliseconds.clamp(0, max.toInt()).toDouble()
               : 0.0;
-          final canSeek = valid && !_seekInProgress;
+          final canSeek = valid && !_seekInProgress && !_liveScrubFailed;
           return Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -538,7 +620,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       const Icon(Icons.touch_app, size: 18),
                       const SizedBox(width: 8),
                       Flexible(
-                        child: Text('Release to jump to ${clock(displayed)}',
+                        child: Text('Scrubbing ${clock(displayed)} · release to play',
                             style: const TextStyle(fontSize: 14),
                             overflow: TextOverflow.ellipsis),
                       ),
