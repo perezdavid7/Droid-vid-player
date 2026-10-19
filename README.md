@@ -79,6 +79,23 @@ messages to help diagnose unsupported or damaged files.
 FFmpegKit's minimal LGPL components have separate distribution obligations;
 review dependency licences before distributing outside personal testing.
 
+### New experimental repair options and precise seeking
+
+- **Quick Repair — original quality** tries stream-copy remuxing into MP4. It does
+  not re-encode video or audio, so introduces no additional compression loss.
+  Incompatible codecs/containers and severely damaged timestamps may still fail
+  or result in an output with incorrect timing; inspect the result carefully.
+- **Deep Recovery — high quality** uses MPEG-4 Part 2 quality level 2 (previously
+  level 5) and 192 kb/s AAC (previously 160 kb/s). This may use more space and
+  still involves lossy re-encoding. Always compare important originals.
+- While video is at normal zoom, swipe horizontally across the image for
+  **velocity-sensitive seeking**. Slower finger movement gives fine positioning;
+  faster movement travels farther. The player makes one seek on release, not
+  continuous seeks, to avoid stalling corrupt media. At higher zoom, one-finger
+  panning takes priority. The existing seek slider remains available.
+- All these changes need a successful GitHub Actions build and real-device
+  testing. No guarantee of perfect quality or frame-accurate seeking.
+
 ## Development notes
 
 - Source files are kept in GitHub rather than a monolithic ZIP. GitHub Actions can validate/build without a developer's laptop.
