@@ -97,10 +97,10 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
           _advice = 'Unknown format. Inspect the file for recoverable '
               'media signatures before selecting a recovery method.';
         }
-        _diagnostics = 'Detected: '+identification.format+'\n'
-            'Evidence: '+identification.evidence+'\n'
-            'Data pattern: '+identification.pattern+'\n'
-            'MP4 boxes: '+identification.mp4Boxes;
+        _diagnostics = 'Detected: ${identification.format}\n'
+            'Evidence: ${identification.evidence}\n'
+            'Data pattern: ${identification.pattern}\n'
+            'MP4 boxes: ${identification.mp4Boxes}';
       });
     } catch (e) {
       if (mounted && !_cancelled) {
@@ -141,7 +141,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
         _scan = result;
         _didDeepScan = true;
         _canAttempt = streamCandidate;
-        _diagnostics = _diagnostics+'\n\n'+result.diagnostic;
+        _diagnostics = '$_diagnostics\n\n${result.diagnostic}';
         _status = 'Media-structure scan completed.';
         _advice = streamCandidate
             ? 'Potential media stream structure detected. '
@@ -215,9 +215,8 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
     final success = !_cancelled && ReturnCode.isSuccess(code) &&
         (_frames > 0 || loggedFrames > 0);
     if (!success) {
-      _attemptLogs.add('Validation rejected '+p.basename(path)+
-          ': exit='+code.toString()+', frames='+_frames.toString()+
-          ', logged frames='+loggedFrames.toString());
+      _attemptLogs.add('Validation rejected ${p.basename(path)}: '
+          'exit=$code, frames=$_frames, logged frames=$loggedFrames');
     }
     return success;
   }
@@ -263,9 +262,9 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
       await dir.create(recursive: true);
       final cleanName = p.basenameWithoutExtension(widget.sourcePath)
           .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
-      final stem = (cleanName.isEmpty ? 'video' :
-          cleanName.substring(0, cleanName.length > 40 ? 40 : cleanName.length))
-          +'_guided_'+DateTime.now().microsecondsSinceEpoch.toString();
+      final safeBase = cleanName.isEmpty ? 'video' :
+          cleanName.substring(0, cleanName.length > 40 ? 40 : cleanName.length);
+      final stem = '${safeBase}_guided_${DateTime.now().microsecondsSinceEpoch}';
       final rawFormat = _scan?.rawFormat;
       final forcedInput = _identified?.category == 'unknown'
           ? (_scan?.psPackHeaders != null && _scan!.psPackHeaders > 0
@@ -284,9 +283,9 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
       for (final quick in <bool>[true, false]) {
         if (_cancelled) break;
         final ext = quick ? 'mkv' : 'mp4';
-        workFile = p.join(dir.path, stem+
-            (quick ? '.copy.working.mkv' : '.deep.working.mp4'));
-        final outputFile = p.join(dir.path, stem+'.'+ext);
+        workFile = p.join(dir.path,
+            '$stem${quick ? '.copy.working.mkv' : '.deep.working.mp4'}');
+        final outputFile = p.join(dir.path, '$stem.$ext');
         setState(() => _status = quick
             ? 'Attempt 1/2: Lossless stream repair…'
             : 'Attempt 2/2: Decode and rebuild video…');
@@ -308,9 +307,9 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
         final success = ReturnCode.isSuccess(code) && !_cancelled;
         if (!success) {
           final log = await session.getLogsAsString();
-          _attemptLogs.add((quick ? 'Lossless remux: ' : 'Deep rebuild: ')+
-              'exit '+code.toString()+'\n'+
-              (log.length > 700 ? log.substring(log.length-700) : log));
+          final detail = log.length > 700 ? log.substring(log.length - 700) : log;
+          _attemptLogs.add(
+              '${quick ? 'Lossless remux' : 'Deep rebuild'}: exit $code\n$detail');
         }
         final valid = success && await _verifyVideo(workFile);
         if (valid && !_cancelled) {
@@ -401,7 +400,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
                 style: TextStyle(fontSize: 22,
                     fontWeight: FontWeight.bold)),
               const SizedBox(height: 8),
-              Text('Source: '+label, maxLines: 2,
+              Text('Source: $label', maxLines: 2,
                   overflow: TextOverflow.ellipsis),
               const SizedBox(height: 12),
               const Text(
@@ -414,7 +413,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
                   fontWeight: FontWeight.w600)),
               if (_identified != null) ...[
                 const SizedBox(height: 8),
-                Text('Detected format: '+_identified!.format),
+                Text('Detected format: ${_identified!.format}'),
               ],
               const SizedBox(height: 10),
               Text(_advice, style: const TextStyle(
@@ -425,9 +424,9 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
                     ? LinearProgressIndicator(value: _progress)
                     : const LinearProgressIndicator(),
                 if (_progress > 0 && _result == null)
-                  Text('File scan: '+(_progress * 100).toStringAsFixed(0)+'%'),
+                  Text('File scan: ${(_progress * 100).toStringAsFixed(0)}%'),
                 if (_frames > 0)
-                  Text('Decoder/encoder frames processed: '+_frames.toString()),
+                  Text('Decoder/encoder frames processed: $_frames'),
               ],
               const SizedBox(height: 16),
               if (!_running && !_canAttempt &&
