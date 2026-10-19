@@ -445,7 +445,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 : 4.5;
     final max = player.state.duration.inMilliseconds.toDouble();
     _swipeTargetMilliseconds = (_swipeTargetMilliseconds +
-        dx * secondsPerPixel * 1000).clamp(0.0, max);
+        dx * secondsPerPixel * 1000).clamp(0.0, max).toDouble();
     _updateScrub(_swipeTargetMilliseconds);
   }
 
