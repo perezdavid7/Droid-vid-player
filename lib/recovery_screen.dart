@@ -424,6 +424,20 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                              'videos may report an incorrect duration.'),
                 ],
               ],
+              if (_mode == RecoveryMode.advancedAnalysis &&
+                  _scan != null && !_running)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    _scan!.rawFormat != null
+                        ? 'Potential raw video signatures detected. '
+                          'This is a diagnostic only; no playable file was created.'
+                        : 'No complete raw video signature set identified. '
+                          'A missing moov box cannot be rebuilt from these '
+                          'markers alone.',
+                    style: const TextStyle(color: Colors.amberAccent),
+                  ),
+                ),
               if (_error != null) ...[
                 const SizedBox(height: 12),
                 Text(_error!, style: const TextStyle(color: Colors.orangeAccent)),
