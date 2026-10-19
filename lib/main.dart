@@ -293,6 +293,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> jump(int seconds) async {
+    // Repeated seeking on broken timestamps may restart playback or hang mpv.
+    if (_seekInProgress || _unreliableDuration) return;
     final state = player.state;
     final ms = (state.position.inMilliseconds + seconds * 1000)
         .clamp(0, state.duration.inMilliseconds);
@@ -403,10 +405,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     } on TimeoutException {
       if (mounted && generation == _scrubGeneration) {
+        // Stop further seek attempts on this input until a new video is loaded.
+        setState(() => _unreliableDuration = true);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text(
             'This video is taking too long to seek. '
-            'It may need sequential playback or recovery.',
+            'Further seeking is disabled to protect playback.',
           )),
         );
       }
@@ -513,10 +517,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ),
       IconButton(
         tooltip: 'Back 10 seconds',
-        onPressed: files.isEmpty ? null : () {
-          _wakeControls();
-          jump(-10);
-        },
+        onPressed: files.isEmpty || _unreliableDuration || _seekInProgress
+            ? null
+            : () {
+                _wakeControls();
+                jump(-10);
+              },
         icon: const Icon(Icons.replay_10),
       ),
       IconButton.filled(
@@ -529,10 +535,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ),
       IconButton(
         tooltip: 'Forward 10 seconds',
-        onPressed: files.isEmpty ? null : () {
-          _wakeControls();
-          jump(10);
-        },
+        onPressed: files.isEmpty || _unreliableDuration || _seekInProgress
+            ? null
+            : () {
+                _wakeControls();
+                jump(10);
+              },
         icon: const Icon(Icons.forward_10),
       ),
       IconButton(
