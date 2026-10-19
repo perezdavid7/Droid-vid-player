@@ -83,6 +83,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   double _shuttleTravel = 0.0;
   DateTime? _lastSwipeUpdate;
   Future<void>? _shuttleTask;
+  DateTime _lastShuttleNativeUpdate =
+      DateTime.fromMillisecondsSinceEpoch(0);
   String? _shuttleWarning;
   Timer? _liveScrubTimer;
   Future<void>? _liveScrubTask;
@@ -637,6 +639,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _appliedShuttleRate = speed;
     _requestedShuttleRate = speed;
     _shuttleRate = speed;
+    _lastShuttleNativeUpdate =
+        DateTime.now().subtract(const Duration(milliseconds: 200));
     _shuttleTravel = 0.0;
     _lastSwipeUpdate = DateTime.now();
     _hideTimer?.cancel();
@@ -709,9 +713,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
           await player.setVolume(0).timeout(const Duration(seconds: 3));
           _shuttleMuted = true;
         }
-        if (!_shuttleRateApplied || (rate - _appliedShuttleRate).abs() > 0.20) {
-          await player.setRate(rate).timeout(const Duration(seconds: 3));
-          _appliedShuttleRate = rate;
+        if (!_shuttleRateApplied || (rate - _appliedShuttleRate).abs() > 0.35) {
+          final since = DateTime.now().difference(_lastShuttleNativeUpdate);
+          if (since < const Duration(milliseconds: 180)) {
+            await Future<void>.delayed(
+                const Duration(milliseconds: 180) - since);
+          }
+          if (!_shuttling || generation != _shuttleGeneration ||
+              _requestedShuttleDirection == 0) {
+            return;
+          }
+          // Use the latest speed rather than an outdated drag sample.
+          final currentRate = _requestedShuttleRate;
+          await player.setRate(currentRate).timeout(const Duration(seconds: 3));
+          _lastShuttleNativeUpdate = DateTime.now();
+          _appliedShuttleRate = currentRate;
           _shuttleRateApplied = true;
         }
         if (!player.state.playing) {
