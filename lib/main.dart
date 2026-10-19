@@ -60,6 +60,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   int _scrubGeneration = 0;
   bool _resumeAfterScrub = false;
   bool _seekInProgress = false;
+  double _swipeTargetMilliseconds = 0;
+  DateTime? _lastSwipeUpdate;
+
 
 
   // One transform for the full video viewport; gestures and buttons share it.
@@ -415,6 +418,43 @@ class _PlayerScreenState extends State<PlayerScreen> {
     setState(() => _scrubPosition = Duration(milliseconds: v.round()));
   }
 
+  void _beginVideoSwipe(DragStartDetails details) {
+    final duration = player.state.duration;
+    if (files.isEmpty || _seekInProgress || _unreliableDuration ||
+        duration <= Duration.zero || _scrubbing) return;
+    _swipeTargetMilliseconds = player.state.position.inMilliseconds.toDouble();
+    _lastSwipeUpdate = DateTime.now();
+    _beginScrub(_swipeTargetMilliseconds);
+  }
+
+  void _updateVideoSwipe(DragUpdateDetails details) {
+    if (!_scrubbing || _lastSwipeUpdate == null) return;
+    final now = DateTime.now();
+    final elapsed = now.difference(_lastSwipeUpdate!).inMicroseconds / 1000000.0;
+    _lastSwipeUpdate = now;
+    final dx = details.delta.dx;
+    final pixelsPerSecond = dx.abs() / elapsed.clamp(0.008, 0.3);
+    // Moving slowly advances a fraction of a second per pixel. A quicker
+    // swipe accelerates, allowing large jumps without a long gesture.
+    final secondsPerPixel = pixelsPerSecond < 100
+        ? 0.12
+        : pixelsPerSecond < 350
+            ? 0.5
+            : pixelsPerSecond < 750
+                ? 1.8
+                : 4.5;
+    final max = player.state.duration.inMilliseconds.toDouble();
+    _swipeTargetMilliseconds = (_swipeTargetMilliseconds +
+        dx * secondsPerPixel * 1000).clamp(0.0, max);
+    _updateScrub(_swipeTargetMilliseconds);
+  }
+
+  void _endVideoSwipe(DragEndDetails details) {
+    if (!_scrubbing || _lastSwipeUpdate == null) return;
+    _lastSwipeUpdate = null;
+    _endScrub(_swipeTargetMilliseconds);
+  }
+
   Future<void> _endScrub(double v) async {
     if (!_scrubbing || _seekInProgress) return;
     final generation = _scrubGeneration;
@@ -495,8 +535,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     children: [
                       const Icon(Icons.touch_app, size: 18),
                       const SizedBox(width: 8),
-                      Text('Release to jump to ${clock(displayed)}',
-                          style: const TextStyle(fontSize: 14)),
+                      Flexible(
+                        child: Text('Release to jump to ${clock(displayed)}',
+                            style: const TextStyle(fontSize: 14),
+                            overflow: TextOverflow.ellipsis),
+                      ),
                     ],
                   ),
                 ),
@@ -697,6 +740,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _doubleTapPosition = details.localPosition;
         },
         onDoubleTap: _doubleTapZoom,
+        // Use one-finger swiping for seek only at normal zoom; zoomed videos
+        // retain one-finger pan and multi-touch pinch controls.
+        onHorizontalDragStart: _zoom <= 1.01 ? _beginVideoSwipe : null,
+        onHorizontalDragUpdate: _zoom <= 1.01 ? _updateVideoSwipe : null,
+        onHorizontalDragEnd: _zoom <= 1.01 ? _endVideoSwipe : null,
         child: ClipRect(
           child: InteractiveViewer(
             transformationController: _zoomController,
