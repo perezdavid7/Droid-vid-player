@@ -88,11 +88,14 @@ review dependency licences before distributing outside personal testing.
 - **Deep Recovery — high quality** uses MPEG-4 Part 2 quality level 2 (previously
   level 5) and 192 kb/s AAC (previously 160 kb/s). This may use more space and
   still involves lossy re-encoding. Always compare important originals.
-- While video is at normal zoom, swipe horizontally across the image for
-  **velocity-sensitive seeking**. Slower finger movement gives fine positioning;
-  faster movement travels farther. The player makes one seek on release, not
-  continuous seeks, to avoid stalling corrupt media. At higher zoom, one-finger
-  panning takes priority. The existing seek slider remains available.
+- At normal zoom, a horizontal video gesture now uses **shuttle playback**:
+  the toolbars hide and the video itself plays forward or backward at a variable
+  rate until the thumb is lifted. A compact direction/time indicator remains.
+  The app attempts to restore the prior speed, audio volume, and play/pause state
+  when the gesture ends. At higher zoom, one-finger panning still takes priority.
+- Native backward playback is experimental, codec-sensitive, and may be slow or
+  unsupported with damaged/legacy videos. The regular timeline slider remains
+  available. This is not a guarantee of smooth reverse on every input.
 - All these changes need a successful GitHub Actions build and real-device
   testing. No guarantee of perfect quality or frame-accurate seeking.
 
