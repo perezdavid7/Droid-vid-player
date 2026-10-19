@@ -10,7 +10,9 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-/// Experimental sequential decode -> re-encode recovery. Never seeks, records
+enum RecoveryMode { quickRepair, deepHighQuality }
+
+/// Experimental forward-only repair or decode -> re-encode recovery. Never seeks, records
 /// only decoded media streams (not player UI), and never touches the original.
 /// Recovery runs inside the foreground app; Android may suspend/kill it if the
 /// app is backgrounded, so the screen is kept awake during processing.
@@ -23,6 +25,7 @@ class RecoveryScreen extends StatefulWidget {
 }
 
 class _RecoveryScreenState extends State<RecoveryScreen> {
+  RecoveryMode _mode = RecoveryMode.deepHighQuality;
   bool _running = false;
   bool _cancelling = false;
   bool _savingGallery = false;
@@ -78,7 +81,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       _frames = 0;
       _diagnostic = null;
       _processed = Duration.zero;
-      _status = 'Recovering sequentially (no seeking)…';
+      _status = _mode == RecoveryMode.quickRepair
+          ? 'Quick Repair: rebuilding the container without re-encoding…'
+          : 'Deep Recovery: decoding and rebuilding at high quality…';
     });
     try {
       final documents = await getApplicationDocumentsDirectory();
@@ -88,7 +93,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
       final baseName = cleanBase.isEmpty ? 'video' :
           (cleanBase.length > 48 ? cleanBase.substring(0, 48) : cleanBase);
-      final stem = '${baseName}_recovered_${DateTime.now().millisecondsSinceEpoch}';
+      final suffix = _mode == RecoveryMode.quickRepair
+          ? 'quick_repair' : 'deep_high_quality';
+      final stem = '${baseName}_${suffix}_${DateTime.now().millisecondsSinceEpoch}';
       final finalPath = p.join(directory.path, '$stem.mp4');
       final partialPath = p.join(directory.path, '$stem.partial.mp4');
       final logPath = p.join(directory.path, '$stem.log.txt');
@@ -99,21 +106,32 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       _logPath = logPath;
       await _wake(true);
 
-      // FFmpeg reads packets strictly forward. Video frames are decoded and
-      // re-encoded as MPEG-4 Part 2 in an MP4 container; audio becomes AAC.
-      // These codecs use the LGPL minimal FFmpeg variant, not GPL x264.
-      // Some corrupt streams cannot be probed or decoded at all.
-      final args = <String>[
+      // Both modes run forward with no seeks.
+      // Quick Repair copies compressed streams unchanged, so it cannot introduce
+      // new generation loss. This does not necessarily fix all bad timestamps,
+      // and codecs not permitted in MP4 will make it fail.
+      // Deep Recovery re-encodes decoded streams using a higher-quality MPEG-4
+      // setting (q:v=2 rather than the previous q:v=5). This can still lose
+      // quality, and it cannot reconstruct missing/damaged frames.
+      final sharedArgs = <String>[
         '-hide_banner', '-nostdin', '-loglevel', 'warning',
         '-fflags', '+genpts+discardcorrupt',
         '-err_detect', 'ignore_err',
         '-i', widget.sourcePath,
         '-map', '0:v:0', '-map', '0:a:0?',
         '-sn', '-dn',
-        '-c:v', 'mpeg4', '-q:v', '5', '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac', '-b:a', '160k',
-        '-af', 'aresample=async=1000:first_pts=0',
-        '-fps_mode', 'vfr',
+      ];
+      final encodingArgs = _mode == RecoveryMode.quickRepair
+          ? <String>['-c', 'copy']
+          : <String>[
+              '-c:v', 'mpeg4', '-q:v', '2', '-pix_fmt', 'yuv420p',
+              '-c:a', 'aac', '-b:a', '192k',
+              '-af', 'aresample=async=1000:first_pts=0',
+              '-fps_mode', 'vfr',
+            ];
+      final args = <String>[
+        ...sharedArgs,
+        ...encodingArgs,
         '-avoid_negative_ts', 'make_zero',
         '-max_muxing_queue_size', '1024',
         '-movflags', '+faststart',
@@ -164,6 +182,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           : logs;
       await File(logPath).writeAsString(
         'Droid Vid Player sequential recovery (experimental)\n'
+        'Mode: ${_mode == RecoveryMode.quickRepair ? 'Quick Repair' : 'Deep High Quality'}\n'
         'Source: ${widget.sourcePath}\n'
         'Output: $finalPath\n'
         'Exit code: ${code?.toString() ?? 'none'}\n'
@@ -188,11 +207,16 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         _resultPath = success ? finalPath : null;
         _sessionId = null;
         _status = success
-            ? 'Recovery finished. A new video was created.'
+            ? (_mode == RecoveryMode.quickRepair
+                ? 'Quick Repair completed without recompressing video.'
+                : 'High-quality Deep Recovery completed.')
             : _cancelling ? 'Recovery stopped.' : 'Recovery incomplete.';
         _diagnostic = success ? null : diagnostic;
-        _error = success ? null : 'The input may contain unsupported or '
-            'unrecoverable data. Check the FFmpeg diagnostic below.';
+        _error = success ? null : _mode == RecoveryMode.quickRepair
+            ? 'Quick Repair could not copy these streams to MP4, or their '
+              'metadata is damaged. Try Deep Recovery instead.'
+            : 'The input may contain unsupported or unrecoverable data. '
+              'Check the FFmpeg diagnostic below.';
       });
       if (success) await _saveToGallery();
     } catch (e) {
@@ -266,18 +290,45 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           child: ListView(
             padding: const EdgeInsets.all(18),
             children: [
-              const Text('Sequential video recovery',
+              const Text('Recover & Record',
                 style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
               const SizedBox(height: 10),
               Text('Source: $_name', maxLines: 2,
                 overflow: TextOverflow.ellipsis),
               const SizedBox(height: 12),
               const Text(
-                'This reads the file forward without scrubbing or skipping, '
-                'decodes recoverable video and audio, then creates a separate '
-                'MP4. Player buttons and borders are never recorded. '
-                'It cannot recreate missing frames or guarantee success with '
-                'every damaged file.',
+                'Choose how to rebuild this video. Both methods read forward '
+                'and create a separate file without recording player controls. '
+                'Neither method can recreate missing video data.',
+              ),
+              const SizedBox(height: 12),
+              DropdownButton<RecoveryMode>(
+                isExpanded: true,
+                value: _mode,
+                onChanged: locked ? null : (value) {
+                  if (value == null) return;
+                  setState(() => _mode = value);
+                },
+                items: const [
+                  DropdownMenuItem(
+                    value: RecoveryMode.quickRepair,
+                    child: Text('Quick Repair — original quality'),
+                  ),
+                  DropdownMenuItem(
+                    value: RecoveryMode.deepHighQuality,
+                    child: Text('Deep Recovery — high quality'),
+                  ),
+                ],
+              ),
+              Text(
+                _mode == RecoveryMode.quickRepair
+                    ? 'Copies the original compressed streams without quality '
+                      'loss. Faster, but some codecs cannot be placed in MP4 '
+                      'and badly broken timestamps may remain.'
+                    : 'Decodes recoverable frames and audio into a new MP4 '
+                      'using improved quality settings. Can fix problems '
+                      'Quick Repair cannot, but may still soften the picture '
+                      'and use more storage.',
               ),
               const SizedBox(height: 14),
               const Text(
@@ -315,7 +366,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 FilledButton.icon(
                   onPressed: _start,
                   icon: const Icon(Icons.auto_fix_high),
-                  label: const Text('Start Recover & Record'),
+                  label: Text(_mode == RecoveryMode.quickRepair
+                      ? 'Start Quick Repair'
+                      : 'Start High-Quality Deep Recovery'),
                 ),
               if (_running)
                 OutlinedButton.icon(
