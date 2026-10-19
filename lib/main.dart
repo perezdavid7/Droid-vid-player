@@ -55,11 +55,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   DateTime _ignorePositionBackstepsUntil = DateTime.fromMillisecondsSinceEpoch(0);
 
   Duration? _scrubPosition;
-  Uint8List? _scrubFrame;
-  Timer? _scrubPreviewDebounce;
-  Future<void>? _scrubPreviewTask;
   int _scrubGeneration = 0;
   bool _resumeAfterScrub = false;
+  bool _seekInProgress = false;
 
 
   // One transform for the full video viewport; gestures and buttons share it.
@@ -232,7 +230,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _hideTimer?.cancel();
-    _scrubPreviewDebounce?.cancel();
     _scrubGeneration++;
     _positionSubscription?.cancel();
     _completedSubscription?.cancel();
@@ -282,11 +279,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _unreliableDuration = false;
       _lastPosition = null;
       _scrubPosition = null;
-      _scrubFrame = null;
       _scrubbing = false;
+      _seekInProgress = false;
       _lastPlaylistIndex = start < 0 ? 0 : start;
     });
-    _scrubPreviewDebounce?.cancel();
     _scrubGeneration++;
     _resetZoom(wakeControls: false);
     await player.open(Playlist(
@@ -309,7 +305,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (files.isEmpty) return;
     final originalIndex = player.state.playlist.index;
     final index = originalIndex.clamp(0, files.length - 1);
-    _scrubPreviewDebounce?.cancel();
     _scrubGeneration++;
     setState(() {
       _ended = false;
@@ -318,7 +313,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _lastPlaylistIndex = index;
       _scrubbing = false;
       _scrubPosition = null;
-      _scrubFrame = null;
+      _seekInProgress = false;
     });
     _ignorePositionBackstepsUntil =
         DateTime.now().add(const Duration(seconds: 3));
@@ -362,14 +357,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
 
+  // Scrubbing is deliberately lightweight: never seek/decode an image while
+  // the finger is moving. The old repeated seek + screenshot pipeline could
+  // stall mpv and prevent the final seek from completing on malformed files.
   void _beginScrub(double v) {
-    _scrubPreviewDebounce?.cancel();
+    if (_seekInProgress) return;
     ++_scrubGeneration;
     _resumeAfterScrub = player.state.playing;
     setState(() {
       _scrubbing = true;
       _scrubPosition = Duration(milliseconds: v.round());
-      _scrubFrame = null;
       _showControls = true;
     });
     _hideTimer?.cancel();
@@ -377,71 +374,54 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _updateScrub(double v) {
-    final target = Duration(milliseconds: v.round());
-    setState(() {
-      _scrubPosition = target;
-      _scrubFrame = null;
-    });
-    _scrubPreviewDebounce?.cancel();
-    final generation = _scrubGeneration;
-    _scrubPreviewDebounce = Timer(const Duration(milliseconds: 300), () {
-      if (mounted && _scrubbing && generation == _scrubGeneration &&
-          _scrubPreviewTask == null) {
-        _scrubPreviewTask = _previewScrubFrame(target, generation);
-      }
-    });
-  }
-
-  Future<void> _previewScrubFrame(Duration target, int generation) async {
-    try {
-      _ignorePositionBackstepsUntil =
-          DateTime.now().add(const Duration(seconds: 3));
-      await player.seek(target);
-      await Future<void>.delayed(const Duration(milliseconds: 180));
-      if (!mounted || !_scrubbing || generation != _scrubGeneration) return;
-      final bytes = await player.screenshot(format: 'image/jpeg');
-      if (mounted && _scrubbing && generation == _scrubGeneration &&
-          _scrubPosition == target) {
-        setState(() => _scrubFrame = bytes);
-      }
-    } catch (_) {
-      // The timestamp preview still displays if a damaged frame fails.
-    } finally {
-      _scrubPreviewTask = null;
-      final latest = _scrubPosition;
-      if (mounted && _scrubbing && generation == _scrubGeneration &&
-          latest != null && latest != target) {
-        _updateScrub(latest.inMilliseconds.toDouble());
-      }
-    }
+    if (!_scrubbing) return;
+    setState(() => _scrubPosition = Duration(milliseconds: v.round()));
   }
 
   Future<void> _endScrub(double v) async {
-    _scrubPreviewDebounce?.cancel();
+    if (!_scrubbing || _seekInProgress) return;
     final generation = _scrubGeneration;
     final resume = _resumeAfterScrub;
-    final task = _scrubPreviewTask;
-    if (task != null) await task;
-    if (!mounted || generation != _scrubGeneration) return;
+    final target = Duration(milliseconds: v.round());
+
+    // Clear the dragging UI before any potentially slow native operation.
+    setState(() {
+      _scrubbing = false;
+      _scrubPosition = null;
+      _seekInProgress = true;
+    });
+
     try {
       _ignorePositionBackstepsUntil =
-          DateTime.now().add(const Duration(seconds: 3));
-      await player.seek(Duration(milliseconds: v.round()));
-      if (resume) await player.play();
+          DateTime.now().add(const Duration(seconds: 5));
+      // Exactly one seek per gesture; don't queue screenshots behind it.
+      // This timeout releases the UI but cannot forcibly cancel native mpv I/O.
+      await player.seek(target).timeout(const Duration(seconds: 5));
+      if (!mounted || generation != _scrubGeneration) return;
+      if (resume) {
+        await player.play().timeout(const Duration(seconds: 5));
+      }
+    } on TimeoutException {
+      if (mounted && generation == _scrubGeneration) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text(
+            'This video is taking too long to seek. '
+            'It may need sequential playback or recovery.',
+          )),
+        );
+      }
     } catch (e) {
-      if (mounted) {
+      if (mounted && generation == _scrubGeneration) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Unable to seek here: $e')),
         );
       }
+    } finally {
+      if (mounted && generation == _scrubGeneration) {
+        setState(() => _seekInProgress = false);
+        _scheduleAutoHide();
+      }
     }
-    if (!mounted) return;
-    setState(() {
-      _scrubbing = false;
-      _scrubPosition = null;
-      _scrubFrame = null;
-    });
-    _scheduleAutoHide();
   }
 
   Widget _seekBar() => StreamBuilder<Duration>(
@@ -464,32 +444,30 @@ class _PlayerScreenState extends State<PlayerScreen> {
           final value = valid
               ? displayed.inMilliseconds.clamp(0, max.toInt()).toDouble()
               : 0.0;
+          final canSeek = valid && !_seekInProgress;
           return Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               if (_scrubbing)
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Container(
-                      height: 88, width: 150,
-                      alignment: Alignment.center,
-                      clipBehavior: Clip.hardEdge,
-                      decoration: BoxDecoration(
-                        color: Colors.black87,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.white38),
-                      ),
-                      child: _scrubFrame == null
-                          ? const Text('Preview loading…',
-                              style: TextStyle(fontSize: 12))
-                          : Image.memory(_scrubFrame!,
-                              fit: BoxFit.contain, gaplessPlayback: true),
-                    ),
-                    const SizedBox(width: 10),
-                    Text(clock(displayed),
-                        style: const TextStyle(fontSize: 17)),
-                  ],
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.touch_app, size: 18),
+                      const SizedBox(width: 8),
+                      Text('Release to jump to ${clock(displayed)}',
+                          style: const TextStyle(fontSize: 14)),
+                    ],
+                  ),
+                ),
+              if (_seekInProgress)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 6),
+                  child: Text(
+                    'Seeking to selected frame…',
+                    style: TextStyle(fontSize: 12),
+                  ),
                 ),
               Row(
                 children: [
@@ -499,9 +477,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     child: Slider(
                       value: value,
                       max: max,
-                      onChangeStart: valid ? _beginScrub : null,
-                      onChanged: valid ? _updateScrub : null,
-                      onChangeEnd: valid ? _endScrub : null,
+                      onChangeStart: canSeek ? _beginScrub : null,
+                      onChanged: canSeek ? _updateScrub : null,
+                      onChangeEnd: canSeek ? _endScrub : null,
                     ),
                   ),
                   Text(valid ? clock(length) : '--:--',
