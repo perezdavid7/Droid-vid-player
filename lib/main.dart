@@ -61,6 +61,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _resumeAfterScrub = false;
   bool _seekInProgress = false;
   bool _shuttling = false;
+  bool _slowHolding = false;
+  bool _slowWasPlaying = false;
+  bool _slowStopping = false;
+  int _slowGeneration = 0;
+  Future<void>? _slowStartTask;
+  String? _slowWarning;
+  static const double _holdSlowRate = 0.5;
   bool _shuttleWasPlaying = false;
   bool _shuttleRateApplied = false;
   bool _reverseUnavailable = false;
@@ -150,7 +157,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (!mounted) return;
       setState(() {
         _ended = completed;
-        if (completed && !_shuttling) _showControls = true;
+        if (completed && !_shuttling && !_slowHolding) {
+          _showControls = true;
+        }
       });
       if (completed) _hideTimer?.cancel();
     });
@@ -194,7 +203,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (!mounted) return;
       setState(() {
         _isPlaying = playing;
-        if (!playing && !_shuttling) _showControls = true;
+        if (!playing && !_shuttling && !_slowHolding) {
+          _showControls = true;
+        }
       });
       _scheduleAutoHide();
     });
@@ -203,7 +214,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void _scheduleAutoHide() {
     _hideTimer?.cancel();
     if (!_isPlaying || !_showControls || _scrubbing ||
-        _shuttling || files.isEmpty) {
+        _shuttling || _slowHolding || files.isEmpty) {
       return;
     }
     _hideTimer = Timer(const Duration(seconds: 3), () {
@@ -221,6 +232,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _tapVideo() {
+    if (_slowHolding || _shuttling) return;
     if (!_showControls) {
       _wakeControls();
     } else if (_isPlaying) {
@@ -271,6 +283,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void dispose() {
     _hideTimer?.cancel();
     _cancelLiveScrubQueue();
+    _slowGeneration++;
     _shuttleGeneration++;
     _scrubGeneration++;
     _positionSubscription?.cancel();
@@ -523,11 +536,93 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
 
+  // A long press temporarily plays at half-speed. The usual tap/drag
+  // recognizers remain independent, and no seek/thumbnail work is performed.
+  void _beginHoldSlowMotion(LongPressStartDetails details) {
+    if (files.isEmpty || _shuttling || _scrubbing || _seekInProgress ||
+        _slowHolding || _slowStopping || player.state.completed) {
+      return;
+    }
+    final generation = ++_slowGeneration;
+    _slowWasPlaying = player.state.playing;
+    _hideTimer?.cancel();
+    setState(() {
+      _slowHolding = true;
+      _showControls = false;
+      _slowWarning = null;
+    });
+    _slowStartTask = _activateHoldSlowMotion(generation);
+  }
+
+  Future<void> _activateHoldSlowMotion(int generation) async {
+    try {
+      await player.setRate(_holdSlowRate)
+          .timeout(const Duration(seconds: 3));
+      if (!mounted || generation != _slowGeneration) return;
+      if (!player.state.playing) {
+        await player.play().timeout(const Duration(seconds: 3));
+      }
+    } catch (_) {
+      if (mounted && generation == _slowGeneration) {
+        setState(() => _slowWarning =
+            'Slow motion unavailable on this video');
+      }
+    }
+  }
+
+  void _endHoldSlowMotion(LongPressEndDetails details) {
+    unawaited(_restoreHoldSlowMotion());
+  }
+
+  Future<void> _restoreHoldSlowMotion() async {
+    if (!_slowHolding || _slowStopping) return;
+    _slowStopping = true;
+    final generation = _slowGeneration;
+    var restoreFailed = false;
+    try {
+      // Never send restore commands while the initial rate change is active.
+      await _slowStartTask?.timeout(const Duration(seconds: 4));
+    } catch (_) {
+      restoreFailed = true;
+    }
+    try {
+      await player.setRate(speed).timeout(const Duration(seconds: 4));
+    } catch (_) {
+      restoreFailed = true;
+    }
+    try {
+      if (_slowWasPlaying) {
+        await player.play().timeout(const Duration(seconds: 4));
+      } else {
+        await player.pause().timeout(const Duration(seconds: 4));
+      }
+    } catch (_) {
+      restoreFailed = true;
+    }
+    if (mounted && generation == _slowGeneration) {
+      setState(() {
+        _slowHolding = false;
+        _slowStopping = false;
+        _showControls = true;
+        _slowWarning = null;
+      });
+      _scheduleAutoHide();
+      if (restoreFailed) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text(
+            'Playback did not restore completely. Pause and play to retry.',
+          )),
+        );
+      }
+    }
+  }
+
   // Shuttle mode plays actual frames at a variable playback rate rather than
   // displaying isolated seek positions. Reverse is experimental in libmpv.
   void _beginVideoSwipe(DragStartDetails details) {
     if (files.isEmpty || _seekInProgress || _unreliableDuration ||
-        _scrubbing || _shuttling || player.state.duration <= Duration.zero) {
+        _scrubbing || _shuttling || _slowHolding ||
+        player.state.duration <= Duration.zero) {
       return;
     }
     _shuttleGeneration++;
@@ -976,6 +1071,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _doubleTapPosition = details.localPosition;
         },
         onDoubleTap: _doubleTapZoom,
+        onLongPressStart: _beginHoldSlowMotion,
+        onLongPressEnd: _endHoldSlowMotion,
+        onLongPressCancel: () {
+          unawaited(_restoreHoldSlowMotion());
+        },
         // Use one-finger swiping for seek only at normal zoom; zoomed videos
         // retain one-finger pan and multi-touch pinch controls.
         onHorizontalDragStart: _zoom <= 1.01 ? _beginVideoSwipe : null,
@@ -1013,6 +1113,32 @@ class _PlayerScreenState extends State<PlayerScreen> {
         ),
       );
     },
+  );
+
+  Widget _slowMotionIndicator() => Positioned(
+    top: 18,
+    left: 0,
+    right: 0,
+    child: IgnorePointer(
+      child: Center(
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.72),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: Text(
+              _slowWarning ??
+                  (_slowStopping
+                      ? 'Restoring playback…'
+                      : 'Slow motion 0.5× · Release to resume'),
+              style: const TextStyle(color: Colors.white, fontSize: 15),
+            ),
+          ),
+        ),
+      ),
+    ),
   );
 
   Widget _shuttleIndicator() => Positioned(
@@ -1172,14 +1298,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
               : _videoWithGestures(),
         ),
         if (_shuttling) _shuttleIndicator(),
-        if (_showControls && !_shuttling && !_scrubbing &&
+        if (_slowHolding) _slowMotionIndicator(),
+        if (_showControls && !_shuttling && !_slowHolding && !_scrubbing &&
             files.isNotEmpty)
           Positioned(left: 0, top: 0, right: 0,
               child: _overlayToolbar()),
-        if (_showControls && !_shuttling && files.isNotEmpty)
+        if (_showControls && !_shuttling && !_slowHolding &&
+            files.isNotEmpty)
           Positioned(left: 0, right: 0, bottom: 0,
               child: _overlayControls(context)),
-        if (error != null && !_shuttling && !_scrubbing)
+        if (error != null && !_shuttling && !_slowHolding &&
+            !_scrubbing)
           Positioned(
             left: 12, right: 12,
             top: _fullScreen ? 90 : 12,
