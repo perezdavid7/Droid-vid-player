@@ -39,6 +39,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool fill = false;
   int turns = 0;
   String? error;
+  bool _playbackFailed = false;
+  String? _failedSourcePath;
   bool _isPlaying = false;
   bool _showControls = true;
   bool _fullScreen = false;
@@ -151,6 +153,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  bool _isFatalPlaybackError(String message) {
+    final text = message.toLowerCase();
+    return text.contains('failed to recognize file format') ||
+        text.contains('unrecognized file format') ||
+        text.contains('unsupported format') ||
+        text.contains('failed to open') ||
+        text.contains('could not open') ||
+        text.contains('cannot open') ||
+        text.contains('cannot decode') ||
+        text.contains('failed to decode') ||
+        text.contains('no video stream');
+  }
+
   @override
   void initState() {
     super.initState();
@@ -197,9 +212,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _errorSubscription = player.stream.error.listen((message) {
       if (!mounted || files.isEmpty) return;
       final index = player.state.playlist.index.clamp(0, files.length - 1);
-      final extension = p.extension(files[index]).toLowerCase();
-      setState(() => error = 'Cannot decode this $extension video: $message. '
-          'You can try Recover & Record on this file.');
+      final fatal = _isFatalPlaybackError(message);
+      setState(() {
+        error = message;
+        if (fatal) {
+          _playbackFailed = true;
+          _failedSourcePath = files[index];
+          _showControls = false;
+        }
+      });
+      if (fatal) _hideTimer?.cancel();
     });
     _playingSubscription = player.stream.playing.listen((playing) {
       if (!mounted) return;
@@ -216,7 +238,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void _scheduleAutoHide() {
     _hideTimer?.cancel();
     if (!_isPlaying || !_showControls || _scrubbing ||
-        _shuttling || _slowHolding || files.isEmpty) {
+        _shuttling || _slowHolding || _playbackFailed || files.isEmpty) {
       return;
     }
     _hideTimer = Timer(const Duration(seconds: 3), () {
@@ -331,10 +353,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Future<void> _openRecovery() async {
     if (files.isEmpty) return;
     final index = player.state.playlist.index.clamp(0, files.length - 1);
-    final source = files[index];
+    final source = _failedSourcePath ?? files[index];
     try {
-      // Pause regular playback while the separate decoder is working.
-      await player.pause();
+      // The normal decoder may have failed; never make recovery depend on it.
+      try {
+        await player.pause().timeout(const Duration(seconds: 2));
+      } catch (_) {
+        // FFmpeg recovery operates independently of the playback decoder.
+      }
       if (!mounted) return;
       final recovered = await Navigator.of(context).push<String>(
         MaterialPageRoute<String>(
@@ -353,10 +379,114 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+
+  // A failed decoder must never trap the user inside the player.
+  void _leaveFailedVideo() {
+    _hideTimer?.cancel();
+    _cancelLiveScrubQueue();
+    _scrubGeneration++;
+    setState(() {
+      files.clear();
+      error = null;
+      _playbackFailed = false;
+      _failedSourcePath = null;
+      _showControls = true;
+      _isPlaying = false;
+      _ended = false;
+      _unreliableDuration = false;
+      _scrubbing = false;
+      _seekInProgress = false;
+      _shuttling = false;
+      _slowHolding = false;
+      _fullScreen = false;
+    });
+    unawaited(player.stop().timeout(const Duration(seconds: 2))
+        .catchError((Object _) {}));
+    unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge)
+        .catchError((Object _) {}));
+  }
+
+  // Actions remain available even if video rendering and toolbar fail.
+  Widget _failedPlaybackView() {
+    final source = _failedSourcePath ??
+        (files.isNotEmpty ? files.first : 'Unknown video');
+    return SafeArea(
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480),
+              child: Card(
+                color: const Color(0xFF241F29),
+                child: Padding(
+                  padding: const EdgeInsets.all(18),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Row(children: [
+                        Icon(Icons.error_outline, color: Colors.orangeAccent),
+                        SizedBox(width: 10),
+                        Expanded(child: Text('Unable to play video',
+                          style: TextStyle(fontSize: 20,
+                              fontWeight: FontWeight.bold))),
+                      ]),
+                      const SizedBox(height: 12),
+                      Text(p.basename(source), maxLines: 2,
+                          overflow: TextOverflow.ellipsis),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'The normal player could not recognize or decode this '
+                        'video. Recover & Record can independently attempt to '
+                        'salvage playable video and audio into a new file. '
+                        'Your original will not be changed.',
+                      ),
+                      const SizedBox(height: 20),
+                      FilledButton.icon(
+                        onPressed: _openRecovery,
+                        icon: const Icon(Icons.auto_fix_high),
+                        label: const Text('Recover & Record'),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: openFiles,
+                        icon: const Icon(Icons.folder_open),
+                        label: const Text('Choose another video'),
+                      ),
+                      const SizedBox(height: 8),
+                      TextButton.icon(
+                        onPressed: _leaveFailedVideo,
+                        icon: const Icon(Icons.arrow_back),
+                        label: const Text('Back to start'),
+                      ),
+                      if (error != null && error!.isNotEmpty)
+                        ExpansionTile(
+                          tilePadding: EdgeInsets.zero,
+                          title: const Text('Technical error details',
+                              style: TextStyle(fontSize: 14)),
+                          children: [
+                            SelectableText(error!,
+                                style: const TextStyle(fontSize: 12)),
+                          ],
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> load(List<String> paths, {int start = 0}) async {
     setState(() {
       files..clear()..addAll(paths);
       error = null;
+      _playbackFailed = false;
+      _failedSourcePath = null;
       _showControls = true;
       _ended = false;
       _unreliableDuration = false;
@@ -369,11 +499,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _cancelLiveScrubQueue();
     _scrubGeneration++;
     _resetZoom(wakeControls: false);
-    await player.open(Playlist(
-      paths.map((path) => Media(Uri.file(path).toString())).toList(),
-      index: start < 0 ? 0 : start,
-    ));
-    await player.setPlaylistMode(_repeatMode);
+    try {
+      await player.open(Playlist(
+        paths.map((path) => Media(Uri.file(path).toString())).toList(),
+        index: start < 0 ? 0 : start,
+      ));
+      await player.setPlaylistMode(_repeatMode);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        error = e.toString();
+        _playbackFailed = true;
+        _failedSourcePath = paths[start.clamp(0, paths.length - 1)];
+        _showControls = false;
+      });
+      _hideTimer?.cancel();
+    }
   }
 
   Future<void> jump(int seconds) async {
@@ -1282,7 +1423,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
+  Widget build(BuildContext context) => PopScope(
+    canPop: !_playbackFailed,
+    onPopInvokedWithResult: (didPop, result) {
+      if (!didPop && _playbackFailed) _leaveFailedVideo();
+    },
+    child: Scaffold(
     backgroundColor: Colors.black,
     // Use the app bar only before a video is selected. During playback the
     // overlay toolbar provides all actions and can fully disappear.
@@ -1304,7 +1450,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
               ),
             ],
           ),
-    body: Stack(
+    body: _playbackFailed && files.isNotEmpty
+        ? _failedPlaybackView()
+        : Stack(
       fit: StackFit.expand,
       children: [
         ColoredBox(
@@ -1327,19 +1475,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
             !_scrubbing)
           Positioned(
             left: 12, right: 12,
-            top: _fullScreen ? 90 : 12,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
+            top: _fullScreen ? 90 : 72,
+            child: SafeArea(
+              bottom: false,
+              child: Material(
                 color: Colors.red.shade900,
                 borderRadius: BorderRadius.circular(8),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(10),
-                child: Text(error!),
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 12, top: 6, bottom: 6),
+                  child: Row(
+                    children: [
+                      Expanded(child: Text(error!, maxLines: 3,
+                          overflow: TextOverflow.ellipsis)),
+                      IconButton(
+                        tooltip: 'Dismiss error',
+                        onPressed: () => setState(() => error = null),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
       ],
     ),
-  );
+  ),
+);
 }
