@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'recovery_screen.dart';
+import 'guided_recovery_screen.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -364,7 +364,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (!mounted) return;
       final recovered = await Navigator.of(context).push<String>(
         MaterialPageRoute<String>(
-          builder: (_) => RecoveryScreen(sourcePath: source),
+          builder: (_) => GuidedRecoveryScreen(sourcePath: source),
         ),
       );
       if (!mounted) return;
