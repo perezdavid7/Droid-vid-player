@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'recovery_screen.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -224,7 +225,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   static const extensions = <String>{
     '.mpg', '.mpeg', '.m2v', '.mkv', '.mov', '.mp4',
     '.m4v', '.avi', '.wmv', '.asf', '.webm', '.ts',
-    '.mts', '.m2ts', '.flv', '.3gp', '.vob'
+    '.mts', '.m2ts', '.flv', '.3gp', '.vob', '.vid', '.divx'
   };
 
   @override
@@ -267,6 +268,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await load(selected);
     } catch (e) {
       setState(() => error = e.toString());
+    }
+  }
+
+  Future<void> _openRecovery() async {
+    if (files.isEmpty) return;
+    final index = player.state.playlist.index.clamp(0, files.length - 1);
+    final source = files[index];
+    try {
+      // Pause regular playback while the separate decoder is working.
+      await player.pause();
+      if (!mounted) return;
+      final recovered = await Navigator.of(context).push<String>(
+        MaterialPageRoute<String>(
+          builder: (_) => RecoveryScreen(sourcePath: source),
+        ),
+      );
+      if (!mounted) return;
+      if (recovered != null && await File(recovered).exists()) {
+        // Playback can now seek on the new recovered file. The original
+        // remains where it was and can be reopened at any time.
+        await load([recovered]);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => error = 'Unable to open recovery: $e');
     }
   }
 
@@ -714,6 +740,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
           icon: const Icon(Icons.folder_open),
         ),
         IconButton(
+          tooltip: 'Recover & Record current video',
+          onPressed: _openRecovery,
+          icon: const Icon(Icons.auto_fix_high),
+        ),
+        IconButton(
           tooltip: _fullScreen ? 'Leave full screen' : 'Full screen',
           onPressed: _toggleFullScreen,
           icon: Icon(_fullScreen ? Icons.fullscreen_exit : Icons.fullscreen),
@@ -781,6 +812,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 tooltip: 'Open local videos',
                 icon: const Icon(Icons.folder_open),
               ),
+              if (files.isNotEmpty)
+                IconButton(
+                  tooltip: 'Recover & Record current video',
+                  onPressed: _openRecovery,
+                  icon: const Icon(Icons.auto_fix_high),
+                ),
               IconButton(
                 onPressed: _toggleFullScreen,
                 tooltip: 'Full screen',
