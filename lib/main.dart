@@ -421,7 +421,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void _beginVideoSwipe(DragStartDetails details) {
     final duration = player.state.duration;
     if (files.isEmpty || _seekInProgress || _unreliableDuration ||
-        duration <= Duration.zero || _scrubbing) return;
+        duration <= Duration.zero || _scrubbing) {
+      return;
+    }
     _swipeTargetMilliseconds = player.state.position.inMilliseconds.toDouble();
     _lastSwipeUpdate = DateTime.now();
     _beginScrub(_swipeTargetMilliseconds);
