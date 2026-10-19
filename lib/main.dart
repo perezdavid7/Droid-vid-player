@@ -981,6 +981,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
         onHorizontalDragStart: _zoom <= 1.01 ? _beginVideoSwipe : null,
         onHorizontalDragUpdate: _zoom <= 1.01 ? _updateVideoSwipe : null,
         onHorizontalDragEnd: _zoom <= 1.01 ? _endVideoSwipe : null,
+        onHorizontalDragCancel: _zoom <= 1.01
+            ? () {
+                if (_shuttling) unawaited(_finishVideoShuttle());
+              }
+            : null,
         child: ClipRect(
           child: InteractiveViewer(
             transformationController: _zoomController,
@@ -1107,8 +1112,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    _seekBar(),
-                    if (wide)
+                    if (!_scrubbing && wide)
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                         children: [
@@ -1117,11 +1121,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           _zoomButtons(),
                         ],
                       )
-                    else ...[
+                    else if (!_scrubbing) ...[
                       _transportButtons(),
                       _displayButtons(),
                       _zoomButtons(),
                     ],
+                    // Keep the timeline mounted and anchored to the bottom
+                    // during a drag. Other buttons disappear until release.
+                    _seekBar(),
                   ],
                 ),
               ),
@@ -1135,26 +1142,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   Widget build(BuildContext context) => Scaffold(
     backgroundColor: Colors.black,
-    appBar: _fullScreen
+    // Use the app bar only before a video is selected. During playback the
+    // overlay toolbar provides all actions and can fully disappear.
+    // This also avoids resizing the video viewport as shuttle starts/stops.
+    appBar: _fullScreen || files.isNotEmpty
         ? null
         : AppBar(
-            backgroundColor: _shuttling ? Colors.black : null,
-            title: _shuttling
-                ? const SizedBox.shrink()
-                : const Text('Droid Vid Player'),
+            title: const Text('Droid Vid Player'),
             actions: [
-              if (!_shuttling) IconButton(
+              IconButton(
                 onPressed: openFiles,
                 tooltip: 'Open local videos',
                 icon: const Icon(Icons.folder_open),
               ),
-              if (files.isNotEmpty && !_shuttling)
-                IconButton(
-                  tooltip: 'Recover & Record current video',
-                  onPressed: _openRecovery,
-                  icon: const Icon(Icons.auto_fix_high),
-                ),
-              if (!_shuttling) IconButton(
+              IconButton(
                 onPressed: _toggleFullScreen,
                 tooltip: 'Full screen',
                 icon: const Icon(Icons.fullscreen),
@@ -1171,13 +1172,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
               : _videoWithGestures(),
         ),
         if (_shuttling) _shuttleIndicator(),
-        if (_showControls && !_shuttling && files.isNotEmpty)
+        if (_showControls && !_shuttling && !_scrubbing &&
+            files.isNotEmpty)
           Positioned(left: 0, top: 0, right: 0,
               child: _overlayToolbar()),
         if (_showControls && !_shuttling && files.isNotEmpty)
           Positioned(left: 0, right: 0, bottom: 0,
               child: _overlayControls(context)),
-        if (error != null)
+        if (error != null && !_shuttling && !_scrubbing)
           Positioned(
             left: 12, right: 12,
             top: _fullScreen ? 90 : 12,
