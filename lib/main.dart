@@ -47,6 +47,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   StreamSubscription<bool>? _playingSubscription;
   StreamSubscription<bool>? _completedSubscription;
   StreamSubscription<Duration>? _positionSubscription;
+  StreamSubscription<String>? _errorSubscription;
 
   PlaylistMode _repeatMode = PlaylistMode.none;
   bool _ended = false;
@@ -152,6 +153,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
       _lastPosition = position;
     });
+    _errorSubscription = player.stream.error.listen((message) {
+      if (!mounted || files.isEmpty) return;
+      final extension = p.extension(files[
+        player.state.playlist.index.clamp(0, files.length - 1),
+      ]).toLowerCase();
+      setState(() => error = 'Cannot decode this $extension video: $message. '
+          'You can try Recover & Record on this file.');
+    });
     _playingSubscription = player.stream.playing.listen((playing) {
       if (!mounted) return;
       setState(() {
@@ -234,6 +243,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _scrubGeneration++;
     _positionSubscription?.cancel();
     _completedSubscription?.cancel();
+    _errorSubscription?.cancel();
     _playingSubscription?.cancel();
     _zoomController.removeListener(_onZoomChanged);
     _zoomController.dispose();
