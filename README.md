@@ -42,6 +42,43 @@ Configure these in **Settings → Secrets and variables → Actions**, not in so
 
 **Never commit the signing keystore or password to a public repository.** Keep an offline backup: if the keystore is lost, future in-place updates may not be possible. The transition from old debug builds to the first permanently signed APK usually requires **one last uninstall and reinstall** (back up any app data first). All subsequent signed builds can install over each other if the application ID remains unchanged and version codes increase.
 
+## Experimental Recover & Record (Android)
+
+The player now has a **Recover & Record** action on the current video (magic-wand icon).
+This first implementation uses the minimal FFmpegKit native decoder to read source
+data **forward only** and write a separate MP4 with MPEG-4 video and AAC audio.
+Unlike screen recording, it does not include any video controls or window borders.
+
+- Start from the selected video; keep the app in the foreground. The screen stays
+  awake while FFmpeg processes. Reliable background/unattended service recovery
+  is not yet available.
+- The original file is never overwritten. Working output first goes to a unique
+  private app-storage `.partial.mp4` path and is renamed to `.mp4` only if the
+  process succeeds. Failed/cancelled partials may not be playable.
+- The app attempts to copy successful results to Android Gallery under
+  **Droid Vid Player**. If Gallery export fails, the recovered app-private
+  version is retained and the user can retry.
+- FFmpeg logs are saved privately and the most relevant end of the log is shown
+  in an expandable diagnostic panel. Progress shows *processed output time* and
+  frame count rather than an unreliable source duration percentage.
+- This is an **experimental transcoding fallback**, not yet the originally
+  envisioned literal real-time record-every-decoded-frame/audio fallback.
+  Some broken inputs cannot be decoded or probed and may fail outright.
+- Trim & Clip and robust processing after locking/backgrounding the phone are
+  separate unfinished milestones.
+
+### Legacy format testing
+
+The file picker recognizes MOV, MPG/MPEG, MKV, MP4/M4V, AVI/DIVX, WMV/ASF,
+VOB, TS/MTS/M2TS, FLV, 3GP and `.vid`. Recognition of an extension **does not**
+guarantee the embedded video/audio codec can be decoded. The `.vid` extension
+is not a single standard codec. Test actual files (picture, sound, seeking,
+repeat, and Recover & Record separately). The player now shows decoder error
+messages to help diagnose unsupported or damaged files.
+
+FFmpegKit's minimal LGPL components have separate distribution obligations;
+review dependency licences before distributing outside personal testing.
+
 ## Development notes
 
 - Source files are kept in GitHub rather than a monolithic ZIP. GitHub Actions can validate/build without a developer's laptop.
