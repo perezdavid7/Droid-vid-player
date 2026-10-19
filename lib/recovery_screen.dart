@@ -444,20 +444,32 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                   padding: const EdgeInsets.only(top: 8),
                   child: Text(
                     _identification?.isNonVideo == true
-                        ? 'This file has a recognizable non-video signature. '
-                          'Video repair is not recommended.'
-                        : _identification?.isMp4Family == true &&
-                            _identification!.hasMdat && !_identification!.hasMoov
-                            ? 'MP4 media data was found without its movie index. '
-                              'Quick Repair and Deep Recovery are unlikely to work; '
-                              'metadata reconstruction requires more information.'
-                            : _scan!.rawFormat != null
-                                ? 'Potential raw video headers were found. '
-                                  'This is not proof of a decodable stream.'
-                                : 'No confirmed recoverable video stream. '
-                                  'The file may be damaged, mislabeled, or '
-                                  'use an unrecognized structure. Avoid '
-                                  'repeating an unchanged failed repair.',
+                        ? 'The header identifies non-video data; video repair '
+                          'is not recommended.'
+                        : _identification?.category == 'video' &&
+                            _scan!.psVideoPackets > 0
+                            ? 'Recognized MPEG program stream with video '
+                              'packet markers. A missing MP4 header is '
+                              'normal here. If playback timestamps are '
+                              'unreliable, try Quick Repair first, then '
+                              'Deep Recovery if needed.'
+                        : _identification?.category == 'video'
+                            ? 'Recognized video container. Raw H.264/H.265 '
+                              'signatures are not required for playback. '
+                              'Repair suitability depends on the codec '
+                              'and the decoder result.'
+                            : _identification?.isMp4Family == true &&
+                                _identification!.hasMdat &&
+                                !_identification!.hasMoov
+                                ? 'MP4 media data found without its movie '
+                                  'index. Neither ordinary repair method '
+                                  'can reliably recreate absent metadata.'
+                                : _scan!.rawFormat != null
+                                    ? 'Potential raw H.264/H.265 headers '
+                                      'found; decodability is not yet proven.'
+                                    : 'Format and video content could not '
+                                      'be established. No recovery outcome '
+                                      'can be inferred from this scan.',
                     style: const TextStyle(color: Colors.amberAccent),
                   ),
                 ),
