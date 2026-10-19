@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'raw_video_scan.dart';
+import 'file_identification.dart';
 
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_session.dart';
@@ -28,6 +29,7 @@ class RecoveryScreen extends StatefulWidget {
 class _RecoveryScreenState extends State<RecoveryScreen> {
   RecoveryMode _mode = RecoveryMode.deepHighQuality;
   RawVideoScan? _scan;
+  FileIdentification? _identification;
   double _scanProgress = 0;
   bool _cancelScan = false;
   bool _running = false;
@@ -73,6 +75,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       _cancelling = false;
       _cancelScan = false;
       _scan = null;
+      _identification = null;
       _scanProgress = 0;
       _error = null;
       _diagnostic = null;
@@ -80,6 +83,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     });
     try {
       await _wake(true);
+      final identification = await identifyFile(widget.sourcePath,
+        isCancelled: () => _cancelScan || generation != _generation);
+      if (!mounted || generation != _generation || _cancelScan) return;
       final scan = await scanRawVideo(widget.sourcePath,
         isCancelled: () => _cancelScan || generation != _generation,
         onProgress: (fraction) {
@@ -93,7 +99,15 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       if (!mounted || generation != _generation) return;
       setState(() {
         _scan = scan;
-        _diagnostic = scan.diagnostic;
+        _identification = identification;
+        _diagnostic = '${identification.format}\n'
+            'Signature: ${identification.evidence}\n'
+            'MP4 top-level boxes: ${identification.mp4Boxes}\n'
+            'MP4 structure truncated/invalid: ${identification.mp4Truncated}\n'
+            'Sample: ${identification.sampledBytes} bytes, '
+            'entropy ${identification.entropy.toStringAsFixed(2)}/8\n'
+            'Pattern: ${identification.pattern}\n\n'
+            '${scan.diagnostic}';
         _status = 'File analysis completed.';
       });
     } catch (e) {
@@ -429,12 +443,21 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 Padding(
                   padding: const EdgeInsets.only(top: 8),
                   child: Text(
-                    _scan!.rawFormat != null
-                        ? 'Potential raw video signatures detected. '
-                          'This is a diagnostic only; no playable file was created.'
-                        : 'No complete raw video signature set identified. '
-                          'A missing moov box cannot be rebuilt from these '
-                          'markers alone.',
+                    _identification?.isNonVideo == true
+                        ? 'This file has a recognizable non-video signature. '
+                          'Video repair is not recommended.'
+                        : _identification?.isMp4Family == true &&
+                            _identification!.hasMdat && !_identification!.hasMoov
+                            ? 'MP4 media data was found without its movie index. '
+                              'Quick Repair and Deep Recovery are unlikely to work; '
+                              'metadata reconstruction requires more information.'
+                            : _scan!.rawFormat != null
+                                ? 'Potential raw video headers were found. '
+                                  'This is not proof of a decodable stream.'
+                                : 'No confirmed recoverable video stream. '
+                                  'The file may be damaged, mislabeled, or '
+                                  'use an unrecognized structure. Avoid '
+                                  'repeating an unchanged failed repair.',
                     style: const TextStyle(color: Colors.amberAccent),
                   ),
                 ),
