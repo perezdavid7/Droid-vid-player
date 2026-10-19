@@ -60,8 +60,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
   int _scrubGeneration = 0;
   bool _resumeAfterScrub = false;
   bool _seekInProgress = false;
-  double _swipeTargetMilliseconds = 0;
+  bool _shuttling = false;
+  bool _shuttleWasPlaying = false;
+  bool _shuttleRateApplied = false;
+  bool _reverseUnavailable = false;
+  int _shuttleGeneration = 0;
+  int _shuttleDirection = 0;
+  int _appliedShuttleDirection = 1;
+  int _requestedShuttleDirection = 0;
+  double _shuttleRate = 1.0;
+  double _appliedShuttleRate = 1.0;
+  double _requestedShuttleRate = 1.0;
+  double _shuttleOriginalVolume = 100.0;
+  bool _shuttleMuted = false;
+  double _shuttleTravel = 0.0;
   DateTime? _lastSwipeUpdate;
+  Future<void>? _shuttleTask;
+  String? _shuttleWarning;
   Timer? _liveScrubTimer;
   Future<void>? _liveScrubTask;
   Future<void>? _scrubPauseTask;
@@ -135,12 +150,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (!mounted) return;
       setState(() {
         _ended = completed;
-        if (completed) _showControls = true;
+        if (completed && !_shuttling) _showControls = true;
       });
       if (completed) _hideTimer?.cancel();
     });
     _positionSubscription = player.stream.position.listen((position) {
       if (!mounted || _scrubbing) return;
+      if (_shuttling) {
+        // Reverse playback deliberately runs timestamps backward.
+        _lastPosition = position;
+        return;
+      }
       final state = player.state;
       final index = state.playlist.index;
       if (index != _lastPlaylistIndex) {
@@ -174,7 +194,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (!mounted) return;
       setState(() {
         _isPlaying = playing;
-        if (!playing) _showControls = true;
+        if (!playing && !_shuttling) _showControls = true;
       });
       _scheduleAutoHide();
     });
@@ -182,7 +202,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   void _scheduleAutoHide() {
     _hideTimer?.cancel();
-    if (!_isPlaying || !_showControls || _scrubbing || files.isEmpty) {
+    if (!_isPlaying || !_showControls || _scrubbing ||
+        _shuttling || files.isEmpty) {
       return;
     }
     _hideTimer = Timer(const Duration(seconds: 3), () {
@@ -250,6 +271,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void dispose() {
     _hideTimer?.cancel();
     _cancelLiveScrubQueue();
+    _shuttleGeneration++;
     _scrubGeneration++;
     _positionSubscription?.cancel();
     _completedSubscription?.cancel();
@@ -500,38 +522,168 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+
+  // Shuttle mode plays actual frames at a variable playback rate rather than
+  // displaying isolated seek positions. Reverse is experimental in libmpv.
   void _beginVideoSwipe(DragStartDetails details) {
-    final duration = player.state.duration;
     if (files.isEmpty || _seekInProgress || _unreliableDuration ||
-        duration <= Duration.zero || _scrubbing) {
+        _scrubbing || _shuttling || player.state.duration <= Duration.zero) {
       return;
     }
-    _swipeTargetMilliseconds = player.state.position.inMilliseconds.toDouble();
+    _shuttleGeneration++;
+    _shuttleWasPlaying = player.state.playing;
+    _shuttleOriginalVolume = player.state.volume;
+    _shuttleMuted = false;
+    _shuttleRateApplied = false;
+    _reverseUnavailable = false;
+    _shuttleDirection = 0;
+    _appliedShuttleDirection = 1;
+    _requestedShuttleDirection = 0;
+    _appliedShuttleRate = speed;
+    _requestedShuttleRate = speed;
+    _shuttleRate = speed;
+    _shuttleTravel = 0.0;
     _lastSwipeUpdate = DateTime.now();
-    _beginScrub(_swipeTargetMilliseconds);
+    _hideTimer?.cancel();
+    setState(() {
+      _shuttling = true;
+      _showControls = false;
+      _shuttleWarning = null;
+    });
   }
 
   void _updateVideoSwipe(DragUpdateDetails details) {
-    if (!_scrubbing || _lastSwipeUpdate == null) return;
+    if (!_shuttling || _lastSwipeUpdate == null) return;
     final now = DateTime.now();
-    final elapsed = now.difference(_lastSwipeUpdate!).inMicroseconds / 1000000.0;
+    final dt = now.difference(_lastSwipeUpdate!).inMicroseconds / 1000000.0;
     _lastSwipeUpdate = now;
     final dx = details.delta.dx;
-    final speed = dx.abs() / elapsed.clamp(0.008, 0.3);
-    // Smooth velocity curve, avoiding abrupt jump thresholds. Very slow drags
-    // move a few frames; quick swipes can still skip large distances.
-    final secondsPerPixel =
-        (0.025 + (speed / 220) * (speed / 220) * 0.11).clamp(0.025, 2.5);
-    final max = player.state.duration.inMilliseconds.toDouble();
-    _swipeTargetMilliseconds = (_swipeTargetMilliseconds +
-        dx * secondsPerPixel * 1000).clamp(0.0, max).toDouble();
-    _updateScrub(_swipeTargetMilliseconds);
+    _shuttleTravel += dx;
+    if (_shuttleTravel.abs() < 1.8) return;
+    final direction = _shuttleTravel > 0 ? 1 : -1;
+    _shuttleTravel = 0.0;
+    // Slow thumb motion advances frames gently; rapid movement increases the
+    // actual forward/reverse playback speed while the finger is held down.
+    final pixelsPerSecond = dx.abs() / dt.clamp(0.012, 0.25);
+    final rate = (0.35 + pixelsPerSecond / 150.0).clamp(0.35, 5.0).toDouble();
+    if (_reverseUnavailable && direction < 0) {
+      setState(() => _shuttleWarning =
+          'Reverse playback unavailable for this video');
+      return;
+    }
+    setState(() {
+      _shuttleDirection = direction;
+      _shuttleRate = rate;
+      _shuttleWarning = null;
+    });
+    _requestedShuttleDirection = direction;
+    _requestedShuttleRate = rate;
+    _queueShuttleUpdate(_shuttleGeneration);
+  }
+
+  void _queueShuttleUpdate(int generation) {
+    if (_shuttleTask != null || !_shuttling) return;
+    _shuttleTask = _applyShuttle(generation).whenComplete(() {
+      _shuttleTask = null;
+      if (mounted && _shuttling && generation == _shuttleGeneration &&
+          _requestedShuttleDirection != 0 &&
+          (_requestedShuttleDirection != _appliedShuttleDirection ||
+           (_requestedShuttleRate - _appliedShuttleRate).abs() > 0.20)) {
+        _queueShuttleUpdate(generation);
+      }
+    });
+  }
+
+  Future<void> _applyShuttle(int generation) async {
+    try {
+      while (mounted && _shuttling && generation == _shuttleGeneration) {
+        final direction = _requestedShuttleDirection;
+        final rate = _requestedShuttleRate;
+        if (direction == 0) return;
+        final native = player.platform;
+        if (direction != _appliedShuttleDirection) {
+          if (native is! NativePlayer) {
+            throw UnsupportedError('Reverse shuttle requires native playback');
+          }
+          await native.setProperty(
+            'play-direction', direction < 0 ? 'backward' : 'forward',
+          ).timeout(const Duration(seconds: 3));
+          _appliedShuttleDirection = direction;
+        }
+        if (!_shuttleMuted) {
+          await player.setVolume(0).timeout(const Duration(seconds: 3));
+          _shuttleMuted = true;
+        }
+        if (!_shuttleRateApplied || (rate - _appliedShuttleRate).abs() > 0.20) {
+          await player.setRate(rate).timeout(const Duration(seconds: 3));
+          _appliedShuttleRate = rate;
+          _shuttleRateApplied = true;
+        }
+        if (!player.state.playing) {
+          await player.play().timeout(const Duration(seconds: 3));
+        }
+        if (generation != _shuttleGeneration ||
+            !_shuttling ||
+            (_requestedShuttleDirection == _appliedShuttleDirection &&
+             (_requestedShuttleRate - _appliedShuttleRate).abs() <= 0.20)) {
+          break;
+        }
+      }
+    } catch (_) {
+      if (!mounted || generation != _shuttleGeneration) return;
+      if (_requestedShuttleDirection < 0) _reverseUnavailable = true;
+      _requestedShuttleDirection = 0;
+      setState(() => _shuttleWarning =
+          'Shuttle unsupported for this file; lift your finger');
+    }
   }
 
   void _endVideoSwipe(DragEndDetails details) {
-    if (!_scrubbing || _lastSwipeUpdate == null) return;
+    if (!_shuttling) return;
     _lastSwipeUpdate = null;
-    unawaited(_endScrub(_swipeTargetMilliseconds));
+    unawaited(_finishVideoShuttle());
+  }
+
+  Future<void> _finishVideoShuttle() async {
+    if (!_shuttling) return;
+    final generation = _shuttleGeneration;
+    _requestedShuttleDirection = 0;
+    try {
+      await _shuttleTask?.timeout(const Duration(seconds: 4));
+      final native = player.platform;
+      if (native is NativePlayer) {
+        await native.setProperty('play-direction', 'forward')
+            .timeout(const Duration(seconds: 4));
+      }
+      await player.setRate(speed).timeout(const Duration(seconds: 4));
+      if (_shuttleMuted) {
+        await player.setVolume(_shuttleOriginalVolume)
+            .timeout(const Duration(seconds: 4));
+      }
+      if (_shuttleWasPlaying) {
+        await player.play().timeout(const Duration(seconds: 4));
+      } else {
+        await player.pause().timeout(const Duration(seconds: 4));
+      }
+    } catch (_) {
+      if (mounted && generation == _shuttleGeneration) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text(
+            'This video could not shuttle smoothly. Try a recovered copy.',
+          )),
+        );
+      }
+    } finally {
+      if (mounted && generation == _shuttleGeneration) {
+        setState(() {
+          _shuttling = false;
+          _showControls = true;
+          _shuttleWarning = null;
+          _shuttleDirection = 0;
+        });
+        _scheduleAutoHide();
+      }
+    }
   }
 
   Future<void> _endScrub(double v) async {
