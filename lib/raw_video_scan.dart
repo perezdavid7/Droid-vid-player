@@ -19,6 +19,7 @@ class RawVideoScan {
   final int h265Irap;
   final int? h264Offset;
   final int? h265Offset;
+  final String firstBytesHex;
 
   const RawVideoScan({
     required this.fileSize,
@@ -34,6 +35,7 @@ class RawVideoScan {
     required this.h265Irap,
     required this.h264Offset,
     required this.h265Offset,
+    required this.firstBytesHex,
   });
 
   bool get canCopyH264 =>
@@ -49,7 +51,8 @@ class RawVideoScan {
   String get diagnostic {
     final notes = <String>[
       'File size: ${(fileSize / (1024 * 1024)).toStringAsFixed(2)} MiB',
-      'MP4 box markers: ftyp=${ftyp ? "yes" : "no"}, '
+      'First bytes (hex): $firstBytesHex',
+      'Possible MP4 box headers: ftyp=${ftyp ? "yes" : "no"}, '
           'moov=${moov ? "yes" : "no"}, mdat=${mdat ? "yes" : "no"}',
       'Annex-B H.264 signatures: SPS=$h264Sps, PPS=$h264Pps, IDR=$h264Idr',
       'Annex-B H.265 signatures: VPS=$h265Vps, SPS=$h265Sps, '
@@ -84,6 +87,8 @@ bool _box(List<int> data, int i, String name) {
   return length == 0 || length == 1 || length >= 8;
 }
 
+/// Stream across the file with fixed-size windows and a 16-byte overlap.
+/// Candidate headers are evidence only; not proof of recoverable frames.
 Future<RawVideoScan> scanRawVideo(
   String path, {
   void Function(double)? onProgress,
@@ -97,28 +102,26 @@ Future<RawVideoScan> scanRawVideo(
   int? start264, start265;
   var consumed = 0;
   var trailing = <int>[];
+  final firstBytes = <int>[];
 
-  // Bounded memory: process the entire file in chunks, retaining 16 bytes
-  // to cover byte patterns crossing chunk boundaries.
-  await for (final chunk in file.openRead()) {
-    if (isCancelled?.call() ?? false) {
-      throw const FileSystemException('Scan cancelled');
-    }
-    final data = <int>[...trailing, ...chunk];
-    final base = consumed - trailing.length;
-    final scanLimit = data.length - 16;
-    for (var i = 0; i <= scanLimit; i++) {
-      if (data[i] != 0) continue;
-      if (_box(data, i, 'ftyp')) ftyp = true;
-      if (_box(data, i, 'moov')) moov = true;
-      if (_box(data, i, 'mdat')) mdat = true;
-      if (data[i + 1] != 0) continue;
+  // Every byte offset is examined exactly once, including offsets crossing
+  // chunk boundaries and the tail of short files. The 16-byte lookahead
+  // leaves room for 64-bit MP4 box-size candidates and NAL headers.
+  void inspect(List<int> data, int base, int lastExclusive) {
+    for (var i = 0; i < lastExclusive; i++) {
+      if (data[i + 4] == 0x66 || data[i + 4] == 0x6d) {
+        // Do not require a zero high-size byte: 256MB/1GB+ mdat boxes
+        // commonly have nonzero size bytes.
+        if (_box(data, i, 'ftyp')) ftyp = true;
+        if (_box(data, i, 'moov')) moov = true;
+        if (_box(data, i, 'mdat')) mdat = true;
+      }
+      if (data[i] != 0 || data[i + 1] != 0) continue;
       final prefix = data[i + 2] == 1
           ? 3 : (data[i + 2] == 0 && data[i + 3] == 1 ? 4 : 0);
       if (prefix == 0) continue;
       final header = data[i + prefix];
       final absolute = base + i;
-      // Forbid malformed/reserved NAL types and require parameter sets.
       if ((header & 0x80) == 0) {
         switch (header & 0x1f) {
           case 7:
@@ -153,11 +156,31 @@ Future<RawVideoScan> scanRawVideo(
           }
         }
       }
-      i += prefix - 1; // Do not count both 3-byte and 4-byte prefixes.
     }
-    trailing = data.length <= 16 ? data : data.sublist(data.length - 16);
+  }
+
+  await for (final chunk in file.openRead()) {
+    if (isCancelled?.call() ?? false) {
+      throw const FileSystemException('Scan cancelled');
+    }
+    if (firstBytes.length < 24) {
+      firstBytes.addAll(chunk.take(24 - firstBytes.length));
+    }
+    final data = <int>[...trailing, ...chunk];
+    final base = consumed - trailing.length;
+    final scanEnd = data.length > 16 ? data.length - 16 : 0;
+    inspect(data, base, scanEnd);
+    trailing = data.sublist(scanEnd);
     consumed += chunk.length;
     onProgress?.call(size == 0 ? 1 : consumed / size);
+  }
+  if (isCancelled?.call() ?? false) {
+    throw const FileSystemException('Scan cancelled');
+  }
+  // Last seven positions cannot contain complete eight-byte MP4 headers.
+  // Larger stream chunks have already been fully inspected.
+  if (trailing.length >= 8) {
+    inspect(trailing, consumed - trailing.length, trailing.length - 7);
   }
 
   return RawVideoScan(
@@ -165,6 +188,8 @@ Future<RawVideoScan> scanRawVideo(
     h264Sps: sps264, h264Pps: pps264, h264Idr: idr264,
     h265Vps: vps265, h265Sps: sps265, h265Pps: pps265,
     h265Irap: irap265, h264Offset: start264, h265Offset: start265,
+    firstBytesHex: firstBytes.map(
+      (byte) => byte.toRadixString(16).padLeft(2, '0'),
+    ).join(' '),
   );
 }
-
