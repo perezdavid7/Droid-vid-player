@@ -1,0 +1,499 @@
+
+import 'dart:async';
+import 'dart:io';
+
+import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_session.dart';
+import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
+import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+
+import 'file_identification.dart';
+import 'raw_video_scan.dart';
+import 'recovery_screen.dart';
+
+/// Guided recovery: quick preflight, lossless remux, decoding check, optional
+/// high-quality re-encode. The original is never modified or overwritten.
+/// Full byte scanning is reserved for files that cannot be identified.
+class GuidedRecoveryScreen extends StatefulWidget {
+  final String sourcePath;
+  const GuidedRecoveryScreen({super.key, required this.sourcePath});
+
+  @override
+  State<GuidedRecoveryScreen> createState() => _GuidedRecoveryScreenState();
+}
+
+class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
+  FileIdentification? _identified;
+  RawVideoScan? _scan;
+  bool _running = false;
+  bool _cancelled = false;
+  bool _didDeepScan = false;
+  bool _canAttempt = false;
+  bool _gallerySaved = false;
+  String? _result;
+  String? _error;
+  String _status = 'Inspecting file header…';
+  String _advice = 'Please wait.';
+  String _diagnostics = '';
+  double _progress = 0;
+  int _frames = 0;
+  int? _activeSession;
+  final _attemptLogs = <String>[];
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_inspect());
+    });
+  }
+
+  Future<void> _wake(bool enabled) async {
+    try {
+      if (enabled) {
+        await WakelockPlus.enable();
+      } else {
+        await WakelockPlus.disable();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _inspect() async {
+    if (_running) return;
+    setState(() {
+      _running = true;
+      _cancelled = false;
+      _status = 'Identifying file…';
+      _error = null;
+    });
+    try {
+      final identification = await identifyFile(widget.sourcePath,
+          isCancelled: () => _cancelled || !mounted);
+      if (!mounted || _cancelled) return;
+      final recognized = identification.category == 'video' ||
+          identification.category == 'mp4' ||
+          identification.category == 'media';
+      final missingMp4Index = identification.isMp4Family &&
+          identification.hasMdat && !identification.hasMoov;
+      setState(() {
+        _identified = identification;
+        _canAttempt = recognized && !missingMp4Index;
+        _status = 'Initial analysis complete.';
+        if (identification.isNonVideo) {
+          _advice = 'The header belongs to a non-video file. '
+              'No automatic video recovery will run.';
+        } else if (missingMp4Index) {
+          _advice = 'MP4 media data exists, but the movie index is missing. '
+              'Ordinary remuxing cannot reconstruct it. '
+              'Advanced reconstruction may require a matching reference file.';
+        } else if (recognized) {
+          _advice = 'Recognized media. Start with a lossless remux; '
+              'if it fails verification, try Deep Recovery automatically.';
+        } else {
+          _advice = 'Unknown format. Inspect the file for recoverable '
+              'media signatures before selecting a recovery method.';
+        }
+        _diagnostics = 'Detected: '+identification.format+'\n'
+            'Evidence: '+identification.evidence+'\n'
+            'Data pattern: '+identification.pattern+'\n'
+            'MP4 boxes: '+identification.mp4Boxes;
+      });
+    } catch (e) {
+      if (mounted && !_cancelled) {
+        setState(() {
+          _status = 'Could not inspect this file.';
+          _error = e.toString();
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _running = false);
+    }
+  }
+
+  Future<void> _scanUnknown() async {
+    if (_running) return;
+    setState(() {
+      _running = true;
+      _cancelled = false;
+      _progress = 0;
+      _status = 'Scanning for surviving media structure…';
+      _error = null;
+    });
+    await _wake(true);
+    try {
+      final result = await scanRawVideo(widget.sourcePath,
+        isCancelled: () => _cancelled || !mounted,
+        onProgress: (value) {
+          if (!mounted || _cancelled) return;
+          if (value - _progress >= 0.02 || value >= 1) {
+            setState(() => _progress = value);
+          }
+        },
+      );
+      if (!mounted || _cancelled) return;
+      final streamCandidate = (result.psPackHeaders > 0 &&
+          result.psVideoPackets > 0) || result.rawFormat != null;
+      setState(() {
+        _scan = result;
+        _didDeepScan = true;
+        _canAttempt = streamCandidate;
+        _diagnostics = _diagnostics+'\n\n'+result.diagnostic;
+        _status = 'Media-structure scan completed.';
+        _advice = streamCandidate
+            ? 'Potential media stream structure detected. '
+              'A guided recovery attempt may help, but these byte '
+              'markers do not guarantee decodable frames.'
+            : 'No recognizable stream structures found. Trying Quick '
+              'Repair and Deep Recovery again would likely repeat '
+              'their previous failure. Manual tools remain available; '
+              'this scan does not prove that recovery is impossible.';
+      });
+    } catch (e) {
+      if (mounted && !_cancelled) {
+        setState(() {
+          _status = 'File scan failed.';
+          _error = e.toString();
+        });
+      }
+    } finally {
+      await _wake(false);
+      if (mounted) setState(() => _running = false);
+    }
+  }
+
+  Future<FFmpegSession> _execute(List<String> args) async {
+    final completed = Completer<FFmpegSession>();
+    _frames = 0;
+    final session = await FFmpegKit.executeWithArgumentsAsync(
+      args,
+      (finished) {
+        if (!completed.isCompleted) completed.complete(finished);
+      },
+      null,
+      (statistics) {
+        if (!mounted) return;
+        final count = statistics.getVideoFrameNumber();
+        if (count > _frames) {
+          setState(() => _frames = count);
+        }
+      },
+    );
+    _activeSession = session.getSessionId();
+    if (_cancelled && _activeSession != null) {
+      await FFmpegKit.cancel(_activeSession);
+    }
+    try {
+      return await completed.future;
+    } finally {
+      _activeSession = null;
+    }
+  }
+
+  Future<bool> _verifyVideo(String path) async {
+    if (_cancelled || !await File(path).exists()) return false;
+    if (await File(path).length() < 4096) return false;
+    if (mounted) setState(() => _status = 'Verifying decoded video frames…');
+    // This checks that FFmpeg can actually decode initial frames, rather
+    // than trusting an exit code and non-empty MP4/MKV alone.
+    final session = await _execute(<String>[
+      '-hide_banner', '-nostdin', '-loglevel', 'info',
+      '-i', path, '-map', '0:v:0', '-an',
+      '-frames:v', '8', '-f', 'null', '-',
+    ]);
+    final code = await session.getReturnCode();
+    final logs = await session.getLogsAsString();
+    final match = RegExp(r'frame=\s*(\d+)').allMatches(logs).toList();
+    var loggedFrames = 0;
+    for (final m in match) {
+      final value = int.tryParse(m.group(1) ?? '') ?? 0;
+      if (value > loggedFrames) loggedFrames = value;
+    }
+    final success = !_cancelled && ReturnCode.isSuccess(code) &&
+        (_frames > 0 || loggedFrames > 0);
+    if (!success) {
+      _attemptLogs.add('Validation rejected '+p.basename(path)+
+          ': exit='+code.toString()+', frames='+_frames.toString()+
+          ', logged frames='+loggedFrames.toString());
+    }
+    return success;
+  }
+
+  Future<void> _deleteScratch(String path) async {
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+  }
+
+  Future<void> _saveGallery(String path) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await Gal.putVideo(path, album: 'Droid Vid Player');
+      if (mounted) setState(() => _gallerySaved = true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _advice =
+            'Recovery is saved in app storage, but Gallery export '
+            'failed. You can still play the recovered file.');
+      }
+    }
+  }
+
+  Future<void> _recover() async {
+    if (_running || !_canAttempt) return;
+    setState(() {
+      _running = true;
+      _cancelled = false;
+      _error = null;
+      _result = null;
+      _gallerySaved = false;
+      _attemptLogs.clear();
+      _status = 'Preparing recovery…';
+    });
+    await _wake(true);
+    String? workFile;
+    try {
+      final dir = Directory(p.join(
+          (await getApplicationDocumentsDirectory()).path,
+          'DroidVidRecoveries'));
+      await dir.create(recursive: true);
+      final cleanName = p.basenameWithoutExtension(widget.sourcePath)
+          .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+      final stem = (cleanName.isEmpty ? 'video' :
+          cleanName.substring(0, cleanName.length > 40 ? 40 : cleanName.length))
+          +'_guided_'+DateTime.now().microsecondsSinceEpoch.toString();
+      final rawFormat = _scan?.rawFormat;
+      final forcedInput = _identified?.category == 'unknown'
+          ? (_scan?.psPackHeaders != null && _scan!.psPackHeaders > 0
+              ? 'mpeg' : rawFormat)
+          : null;
+      final inputArgs = <String>[
+        '-hide_banner', '-nostdin', '-loglevel', 'warning',
+        '-fflags', '+genpts+discardcorrupt', '-err_detect', 'ignore_err',
+        '-probesize', '20000000', '-analyzeduration', '15000000',
+        if (forcedInput != null) ...['-f', forcedInput],
+        '-i', widget.sourcePath,
+        '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn',
+      ];
+      // Matroska supports more stream-copy combinations than MP4 (such as
+      // MPEG-2 + MP2 audio) and does not introduce compression artifacts.
+      for (final quick in <bool>[true, false]) {
+        if (_cancelled) break;
+        final ext = quick ? 'mkv' : 'mp4';
+        workFile = p.join(dir.path, stem+
+            (quick ? '.copy.working.mkv' : '.deep.working.mp4'));
+        final outputFile = p.join(dir.path, stem+'.'+ext);
+        setState(() => _status = quick
+            ? 'Attempt 1/2: Lossless stream repair…'
+            : 'Attempt 2/2: Decode and rebuild video…');
+        final args = <String>[
+          ...inputArgs,
+          if (quick) ...['-c', 'copy'] else ...[
+            '-c:v', 'mpeg4', '-q:v', '2', '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '192k',
+            '-af', 'aresample=async=1000:first_pts=0',
+            '-fps_mode', 'vfr',
+          ],
+          '-avoid_negative_ts', 'make_zero',
+          '-max_muxing_queue_size', '1024',
+          if (!quick) ...['-movflags', '+faststart'],
+          '-f', quick ? 'matroska' : 'mp4', '-n', workFile,
+        ];
+        final session = await _execute(args);
+        final code = await session.getReturnCode();
+        final success = ReturnCode.isSuccess(code) && !_cancelled;
+        if (!success) {
+          final log = await session.getLogsAsString();
+          _attemptLogs.add((quick ? 'Lossless remux: ' : 'Deep rebuild: ')+
+              'exit '+code.toString()+'\n'+
+              (log.length > 700 ? log.substring(log.length-700) : log));
+        }
+        final valid = success && await _verifyVideo(workFile);
+        if (valid && !_cancelled) {
+          await File(workFile).rename(outputFile);
+          workFile = null;
+          if (!mounted) return;
+          setState(() {
+            _result = outputFile;
+            _status = quick
+                ? 'Lossless recovered copy created and basic decoding verified.'
+                : 'Deep recovered copy created and basic decoding verified.';
+            _advice = 'The initial frames decoded successfully. '
+                'Full-length playback, audio sync, and seeking still '
+                'need to be checked on this output.';
+          });
+          await _saveGallery(outputFile);
+          return;
+        }
+        await _deleteScratch(workFile);
+        workFile = null;
+      }
+      if (!mounted) return;
+      setState(() {
+        _status = _cancelled ? 'Recovery cancelled.' :
+            'No verified video was recovered.';
+        _advice = _cancelled
+            ? 'The original video is unchanged.'
+            : 'Both supported recovery strategies failed to produce '
+              'a file that passed the initial-frame decoding test. '
+              'More specialized reconstruction may be required.';
+        if (!_cancelled) _error = _attemptLogs.join('\n\n');
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _status = _cancelled ? 'Recovery cancelled.' :
+              'Recovery could not finish.';
+          if (!_cancelled) _error = e.toString();
+        });
+      }
+    } finally {
+      if (workFile != null) await _deleteScratch(workFile);
+      await _wake(false);
+      if (mounted) setState(() => _running = false);
+    }
+  }
+
+  Future<void> _cancel() async {
+    if (!_running || _cancelled) return;
+    setState(() {
+      _cancelled = true;
+      _status = 'Stopping…';
+    });
+    final id = _activeSession;
+    if (id != null) {
+      try { await FFmpegKit.cancel(id); } catch (_) {}
+    }
+  }
+
+  Future<void> _manualTools() async {
+    final output = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (_) => RecoveryScreen(sourcePath: widget.sourcePath),
+      ),
+    );
+    if (!mounted) return;
+    if (output != null) Navigator.of(context).pop(output);
+  }
+
+  @override
+  void dispose() {
+    if (!_running) unawaited(_wake(false));
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final label = p.basename(widget.sourcePath);
+    return PopScope(
+      canPop: !_running,
+      child: Scaffold(
+        appBar: AppBar(title: const Text('Recover & Record')),
+        body: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.all(18),
+            children: [
+              const Text('Guided Recovery',
+                style: TextStyle(fontSize: 22,
+                    fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Text('Source: '+label, maxLines: 2,
+                  overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 12),
+              const Text(
+                'First identify the file, then try a lossless repair. '
+                'If the recovered output cannot decode, optionally '
+                'rebuild it at high quality. No original files are changed.',
+              ),
+              const SizedBox(height: 18),
+              Text(_status, style: const TextStyle(fontSize: 16,
+                  fontWeight: FontWeight.w600)),
+              if (_identified != null) ...[
+                const SizedBox(height: 8),
+                Text('Detected format: '+_identified!.format),
+              ],
+              const SizedBox(height: 10),
+              Text(_advice, style: const TextStyle(
+                  color: Colors.amberAccent)),
+              if (_running) ...[
+                const SizedBox(height: 12),
+                _progress > 0 && _progress < 1
+                    ? LinearProgressIndicator(value: _progress)
+                    : const LinearProgressIndicator(),
+                if (_progress > 0 && _result == null)
+                  Text('File scan: '+(_progress * 100).toStringAsFixed(0)+'%'),
+                if (_frames > 0)
+                  Text('Decoder/encoder frames processed: '+_frames.toString()),
+              ],
+              const SizedBox(height: 16),
+              if (!_running && !_canAttempt &&
+                  !_didDeepScan && _identified?.category == 'unknown')
+                FilledButton.icon(
+                  onPressed: _scanUnknown,
+                  icon: const Icon(Icons.manage_search),
+                  label: const Text('Investigate unidentified file'),
+                ),
+              if (!_running && _canAttempt && _result == null)
+                FilledButton.icon(
+                  onPressed: _recover,
+                  icon: const Icon(Icons.auto_fix_high),
+                  label: const Text('Start guided recovery'),
+                ),
+              if (_running)
+                OutlinedButton.icon(
+                  onPressed: _cancelled ? null : _cancel,
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: Text(_cancelled ? 'Stopping…' : 'Cancel'),
+                ),
+              if (_result != null) ...[
+                const SizedBox(height: 12),
+                if (_gallerySaved)
+                  const Text('Saved to Gallery / Droid Vid Player',
+                      style: TextStyle(color: Colors.greenAccent)),
+                FilledButton.icon(
+                  onPressed: () => Navigator.of(context).pop(_result),
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Play recovered copy'),
+                ),
+              ],
+              if (!_running)
+                OutlinedButton.icon(
+                  onPressed: _manualTools,
+                  icon: const Icon(Icons.tune),
+                  label: const Text('Manual repair and analysis tools'),
+                ),
+              if (_diagnostics.isNotEmpty)
+                ExpansionTile(
+                  title: const Text('Technical analysis'),
+                  children: [
+                    SelectableText(_diagnostics,
+                        style: const TextStyle(fontSize: 12)),
+                  ],
+                ),
+              if (_error != null && _error!.isNotEmpty)
+                ExpansionTile(
+                  title: const Text('Recovery diagnostics'),
+                  children: [
+                    SelectableText(_error!,
+                        style: const TextStyle(fontSize: 12)),
+                  ],
+                ),
+              const SizedBox(height: 14),
+              const Text('Original file is never overwritten.',
+                  style: TextStyle(color: Colors.white70)),
+              const Text(
+                'Initial-frame verification is not a complete playback, '
+                'timestamp, or audio-sync test.',
+                style: TextStyle(fontSize: 12, color: Colors.white54),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
