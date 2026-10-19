@@ -19,6 +19,11 @@ class RawVideoScan {
   final int h265Irap;
   final int? h264Offset;
   final int? h265Offset;
+  final int psPackHeaders;
+  final int psVideoPackets;
+  final int psAudioPackets;
+  final int mpegSequenceHeaders;
+  final int mpegPictureHeaders;
   final String firstBytesHex;
 
   const RawVideoScan({
@@ -35,6 +40,11 @@ class RawVideoScan {
     required this.h265Irap,
     required this.h264Offset,
     required this.h265Offset,
+    required this.psPackHeaders,
+    required this.psVideoPackets,
+    required this.psAudioPackets,
+    required this.mpegSequenceHeaders,
+    required this.mpegPictureHeaders,
     required this.firstBytesHex,
   });
 
@@ -54,10 +64,24 @@ class RawVideoScan {
       'First bytes (hex): $firstBytesHex',
       'Possible MP4 box headers: ftyp=${ftyp ? "yes" : "no"}, '
           'moov=${moov ? "yes" : "no"}, mdat=${mdat ? "yes" : "no"}',
+      'MPEG Program Stream signatures: pack=$psPackHeaders, '
+          'video PES=$psVideoPackets, audio PES=$psAudioPackets',
+      'MPEG-1/2 video start codes: sequence=$mpegSequenceHeaders, '
+          'picture=$mpegPictureHeaders',
       'Annex-B H.264 signatures: SPS=$h264Sps, PPS=$h264Pps, IDR=$h264Idr',
       'Annex-B H.265 signatures: VPS=$h265Vps, SPS=$h265Sps, '
           'PPS=$h265Pps, keyframes=$h265Irap',
     ];
+    if (psPackHeaders > 0 && psVideoPackets > 0) {
+      notes.add('MPEG Program Stream pack and video packet markers found. '
+          'These are distinct from raw H.264/H.265 Annex-B signatures. '
+          'Timestamp defects do not necessarily prevent decoding; '
+          'try Quick Repair or Deep Recovery as appropriate.');
+    } else if (psPackHeaders > 0) {
+      notes.add('MPEG Program Stream pack markers detected. '
+          'No video PES markers were identified by this scanner; '
+          'a demuxer probe is needed to confirm video tracks.');
+    }
     if (rawFormat != null) {
       notes.add('Potential raw ${rawFormat!.toUpperCase()} video starts near '
           'byte ${rawStart!}. An experimental, video-only, lossless stream '
@@ -67,9 +91,9 @@ class RawVideoScan {
           'Video may be length-prefixed or fragmented; reconstructing it '
           'requires codec/sample information this scanner cannot infer.');
     } else {
-      notes.add('No sufficiently identified raw Annex-B video stream found. '
-          'A different codec, missing key headers, or overwritten data '
-          'may be responsible. No recovery can be assumed.');
+      notes.add('No complete H.264/H.265 Annex-B header set identified. '
+          'This does not rule out other video codecs or a usable '
+          'container; it is not a recovery-feasibility verdict.');
     }
     return notes.join('\n');
   }
@@ -99,6 +123,8 @@ Future<RawVideoScan> scanRawVideo(
   var ftyp = false, moov = false, mdat = false;
   var sps264 = 0, pps264 = 0, idr264 = 0;
   var vps265 = 0, sps265 = 0, pps265 = 0, irap265 = 0;
+  var psPackHeaders = 0, psVideoPackets = 0, psAudioPackets = 0;
+  var mpegSequenceHeaders = 0, mpegPictureHeaders = 0;
   int? start264, start265;
   var consumed = 0;
   var trailing = <int>[];
@@ -122,6 +148,15 @@ Future<RawVideoScan> scanRawVideo(
       if (prefix == 0) continue;
       final header = data[i + prefix];
       final absolute = base + i;
+      // MPEG Program Stream (pack/PES) and MPEG-1/2 elementary stream
+      // markers use the same 00 00 01 prefix as raw codec NALs.
+      // A PS pack header (0xBA) is not an H.264 SPS; a zero raw
+      // H.264 signature count is expected for many playable MPEG PS files.
+      if (header == 0xBA) psPackHeaders++;
+      if (header >= 0xE0 && header <= 0xEF) psVideoPackets++;
+      if (header >= 0xC0 && header <= 0xDF) psAudioPackets++;
+      if (header == 0xB3) mpegSequenceHeaders++;
+      if (header == 0x00) mpegPictureHeaders++;
       if ((header & 0x80) == 0) {
         switch (header & 0x1f) {
           case 7:
@@ -188,6 +223,9 @@ Future<RawVideoScan> scanRawVideo(
     h264Sps: sps264, h264Pps: pps264, h264Idr: idr264,
     h265Vps: vps265, h265Sps: sps265, h265Pps: pps265,
     h265Irap: irap265, h264Offset: start264, h265Offset: start265,
+    psPackHeaders: psPackHeaders, psVideoPackets: psVideoPackets,
+    psAudioPackets: psAudioPackets, mpegSequenceHeaders: mpegSequenceHeaders,
+    mpegPictureHeaders: mpegPictureHeaders,
     firstBytesHex: firstBytes.map(
       (byte) => byte.toRadixString(16).padLeft(2, '0'),
     ).join(' '),
