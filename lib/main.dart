@@ -155,9 +155,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     });
     _errorSubscription = player.stream.error.listen((message) {
       if (!mounted || files.isEmpty) return;
-      final extension = p.extension(files[
-        player.state.playlist.index.clamp(0, files.length - 1),
-      ]).toLowerCase();
+      final index = player.state.playlist.index.clamp(0, files.length - 1);
+      final extension = p.extension(files[index]).toLowerCase();
       setState(() => error = 'Cannot decode this $extension video: $message. '
           'You can try Recover & Record on this file.');
     });
