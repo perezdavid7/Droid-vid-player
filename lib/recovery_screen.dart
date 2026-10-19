@@ -12,7 +12,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 /// Experimental sequential decode -> re-encode recovery. Never seeks, records
 /// only decoded media streams (not player UI), and never touches the original.
-/// Recovery runs inside the foreground app; Android may suspend/kilI it if the
+/// Recovery runs inside the foreground app; Android may suspend/kill it if the
 /// app is backgrounded, so the screen is kept awake during processing.
 class RecoveryScreen extends StatefulWidget {
   final String sourcePath;
@@ -35,6 +35,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   int? _sessionId;
   int _generation = 0;
   int _frames = 0;
+  String? _diagnostic;
   Duration _processed = Duration.zero;
 
   String get _name => p.basename(widget.sourcePath);
@@ -75,6 +76,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       _error = null;
       _sessionId = null;
       _frames = 0;
+      _diagnostic = null;
       _processed = Duration.zero;
       _status = 'Recovering sequentially (no seeking)…';
     });
@@ -126,7 +128,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         (statistics) {
           if (!mounted || generation != _generation) return;
           setState(() {
-            _processed = Duration(milliseconds: statistics.getTime().clamp(0, 1 << 53));
+            _processed = Duration(milliseconds: statistics.getTime().clamp(0, 1 << 53).toInt());
             _frames = statistics.getVideoFrameNumber();
           });
         },
@@ -157,6 +159,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     try {
       final code = await session.getReturnCode();
       final logs = await session.getLogsAsString();
+      final diagnostic = logs.length > 1400
+          ? logs.substring(logs.length - 1400)
+          : logs;
       await File(logPath).writeAsString(
         'Droid Vid Player sequential recovery (experimental)\n'
         'Source: ${widget.sourcePath}\n'
@@ -185,8 +190,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         _status = success
             ? 'Recovery finished. A new video was created.'
             : _cancelling ? 'Recovery stopped.' : 'Recovery incomplete.';
+        _diagnostic = success ? null : diagnostic;
         _error = success ? null : 'The input may contain unsupported or '
-            'unrecoverable data. See the saved recovery log.';
+            'unrecoverable data. Check the FFmpeg diagnostic below.';
       });
       if (success) await _saveToGallery();
     } catch (e) {
@@ -293,6 +299,16 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               if (_error != null) ...[
                 const SizedBox(height: 12),
                 Text(_error!, style: const TextStyle(color: Colors.orangeAccent)),
+              ],
+              if (_diagnostic != null && _diagnostic!.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                ExpansionTile(
+                  title: const Text('Technical diagnostic'),
+                  children: [
+                    SelectableText(_diagnostic!,
+                        style: const TextStyle(fontSize: 12)),
+                  ],
+                ),
               ],
               const SizedBox(height: 18),
               if (!_running && _resultPath == null)
