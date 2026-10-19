@@ -548,7 +548,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await _liveScrubTask?.timeout(const Duration(seconds: 4));
       await _scrubPauseTask?.timeout(const Duration(seconds: 4));
       if (_liveScrubFailed) {
-        throw const TimeoutException('Live preview could not seek this file');
+        throw TimeoutException('Live preview could not seek this file');
       }
       if (!mounted || generation != _scrubGeneration) return;
       _ignorePositionBackstepsUntil =
