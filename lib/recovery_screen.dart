@@ -1,0 +1,343 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_session.dart';
+import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
+import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+
+/// Experimental sequential decode -> re-encode recovery. Never seeks, records
+/// only decoded media streams (not player UI), and never touches the original.
+/// Recovery runs inside the foreground app; Android may suspend/kilI it if the
+/// app is backgrounded, so the screen is kept awake during processing.
+class RecoveryScreen extends StatefulWidget {
+  final String sourcePath;
+  const RecoveryScreen({super.key, required this.sourcePath});
+
+  @override
+  State<RecoveryScreen> createState() => _RecoveryScreenState();
+}
+
+class _RecoveryScreenState extends State<RecoveryScreen> {
+  bool _running = false;
+  bool _cancelling = false;
+  bool _savingGallery = false;
+  bool _gallerySaved = false;
+  String _status = 'Ready to begin recovery';
+  String? _resultPath;
+  String? _logPath;
+  String? _partialPath;
+  String? _error;
+  int? _sessionId;
+  int _generation = 0;
+  int _frames = 0;
+  Duration _processed = Duration.zero;
+
+  String get _name => p.basename(widget.sourcePath);
+  String _duration(Duration d) {
+    final hours = d.inHours;
+    final minutes = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return hours > 0 ? '$hours:$minutes:$seconds' : '$minutes:$seconds';
+  }
+
+  Future<void> _wake(bool active) async {
+    try {
+      if (active) {
+        await WakelockPlus.enable();
+      } else {
+        await WakelockPlus.disable();
+      }
+    } catch (_) {
+      // Video recovery still works on platforms without wakelock support.
+    }
+  }
+
+  Future<void> _start() async {
+    if (_running || _savingGallery) return;
+    if (!await File(widget.sourcePath).exists()) {
+      setState(() => _error = 'The selected file is no longer accessible. '
+          'Reopen it with the file picker before retrying.');
+      return;
+    }
+    final generation = ++_generation;
+    setState(() {
+      _running = true;
+      _cancelling = false;
+      _gallerySaved = false;
+      _resultPath = null;
+      _partialPath = null;
+      _logPath = null;
+      _error = null;
+      _sessionId = null;
+      _frames = 0;
+      _processed = Duration.zero;
+      _status = 'Recovering sequentially (no seeking)…';
+    });
+    try {
+      final documents = await getApplicationDocumentsDirectory();
+      final directory = Directory(p.join(documents.path, 'DroidVidRecoveries'));
+      await directory.create(recursive: true);
+      final cleanBase = p.basenameWithoutExtension(widget.sourcePath)
+          .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+      final baseName = cleanBase.isEmpty ? 'video' :
+          (cleanBase.length > 48 ? cleanBase.substring(0, 48) : cleanBase);
+      final stem = '${baseName}_recovered_${DateTime.now().millisecondsSinceEpoch}';
+      final finalPath = p.join(directory.path, '$stem.mp4');
+      final partialPath = p.join(directory.path, '$stem.partial.mp4');
+      final logPath = p.join(directory.path, '$stem.log.txt');
+      if (await File(finalPath).exists() || await File(partialPath).exists()) {
+        throw StateError('A recovery output with this name already exists.');
+      }
+      _partialPath = partialPath;
+      _logPath = logPath;
+      await _wake(true);
+
+      // FFmpeg reads packets strictly forward. Video frames are decoded and
+      // re-encoded as MPEG-4 Part 2 in an MP4 container; audio becomes AAC.
+      // These codecs use the LGPL minimal FFmpeg variant, not GPL x264.
+      // Some corrupt streams cannot be probed or decoded at all.
+      final args = <String>[
+        '-hide_banner', '-nostdin', '-loglevel', 'warning',
+        '-fflags', '+genpts+discardcorrupt',
+        '-err_detect', 'ignore_err',
+        '-i', widget.sourcePath,
+        '-map', '0:v:0', '-map', '0:a:0?',
+        '-sn', '-dn',
+        '-c:v', 'mpeg4', '-q:v', '5', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', '-b:a', '160k',
+        '-af', 'aresample=async=1000:first_pts=0',
+        '-fps_mode', 'vfr',
+        '-avoid_negative_ts', 'make_zero',
+        '-max_muxing_queue_size', '1024',
+        '-movflags', '+faststart',
+        '-f', 'mp4', '-n', partialPath,
+      ];
+      final session = await FFmpegKit.executeWithArgumentsAsync(
+        args,
+        (finished) {
+          unawaited(_finish(finished, finalPath, partialPath, logPath, generation));
+        },
+        null,
+        (statistics) {
+          if (!mounted || generation != _generation) return;
+          setState(() {
+            _processed = Duration(milliseconds: statistics.getTime().clamp(0, 1 << 53));
+            _frames = statistics.getVideoFrameNumber();
+          });
+        },
+      );
+      if (!mounted || generation != _generation) return;
+      _sessionId = session.getSessionId();
+      if (_cancelling && _sessionId != null) {
+        await FFmpegKit.cancel(_sessionId);
+      }
+    } catch (e) {
+      await _wake(false);
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _running = false;
+        _error = 'Could not start recovery: $e';
+        _status = 'Recovery failed to start';
+      });
+    }
+  }
+
+  Future<void> _finish(
+    FFmpegSession session,
+    String finalPath,
+    String partialPath,
+    String logPath,
+    int generation,
+  ) async {
+    try {
+      final code = await session.getReturnCode();
+      final logs = await session.getLogsAsString();
+      await File(logPath).writeAsString(
+        'Droid Vid Player sequential recovery (experimental)\n'
+        'Source: ${widget.sourcePath}\n'
+        'Output: $finalPath\n'
+        'Exit code: ${code?.toString() ?? 'none'}\n'
+        'Cancelled: $_cancelling\n'
+        'Processed output time: ${_duration(_processed)}\n'
+        'Decoded/encoded frames: $_frames\n\n'
+        'FFmpeg log:\n$logs',
+        flush: true,
+      );
+      final partial = File(partialPath);
+      final hasPartial = await partial.exists() && await partial.length() > 4096;
+      final success = ReturnCode.isSuccess(code) && hasPartial && !_cancelling;
+      if (success) {
+        await partial.rename(finalPath);
+      }
+      await _wake(false);
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _running = false;
+        _logPath = logPath;
+        _partialPath = hasPartial && !success ? partialPath : null;
+        _resultPath = success ? finalPath : null;
+        _sessionId = null;
+        _status = success
+            ? 'Recovery finished. A new video was created.'
+            : _cancelling ? 'Recovery stopped.' : 'Recovery incomplete.';
+        _error = success ? null : 'The input may contain unsupported or '
+            'unrecoverable data. See the saved recovery log.';
+      });
+      if (success) await _saveToGallery();
+    } catch (e) {
+      await _wake(false);
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _running = false;
+        _sessionId = null;
+        _error = 'Recovery ended, but the output could not be finalized: $e';
+      });
+    }
+  }
+
+  Future<void> _cancel() async {
+    if (!_running || _cancelling) return;
+    setState(() {
+      _cancelling = true;
+      _status = 'Stopping recovery; waiting for the encoder…';
+    });
+    final id = _sessionId;
+    if (id != null) {
+      try {
+        await FFmpegKit.cancel(id);
+      } catch (e) {
+        if (mounted) setState(() => _error = 'Cancel request failed: $e');
+      }
+    }
+  }
+
+  Future<void> _saveToGallery() async {
+    final output = _resultPath;
+    if (output == null || _savingGallery) return;
+    setState(() { _savingGallery = true; _error = null; });
+    try {
+      if (Platform.isAndroid) {
+        await Gal.putVideo(output, album: 'Droid Vid Player');
+      } else {
+        // On desktop, the app-documents file is retained for manual export.
+        throw UnsupportedError('Gallery export is available on Android.');
+      }
+      if (!mounted) return;
+      setState(() {
+        _gallerySaved = true;
+        _status = 'Recovered video saved to your Gallery.';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'The video was recovered and retained in app '
+          'storage, but Gallery export failed: $e');
+    } finally {
+      if (mounted) setState(() => _savingGallery = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    // Avoid orphaning active recovery by disallowing route pop while running.
+    // OS app termination can still stop the native encoder.
+    if (!_running) unawaited(_wake(false));
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final locked = _running || _savingGallery;
+    return PopScope(
+      canPop: !locked,
+      child: Scaffold(
+        appBar: AppBar(title: const Text('Recover & Record')),
+        body: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.all(18),
+            children: [
+              const Text('Sequential video recovery',
+                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 10),
+              Text('Source: $_name', maxLines: 2,
+                overflow: TextOverflow.ellipsis),
+              const SizedBox(height: 12),
+              const Text(
+                'This reads the file forward without scrubbing or skipping, '
+                'decodes recoverable video and audio, then creates a separate '
+                'MP4. Player buttons and borders are never recorded. '
+                'It cannot recreate missing frames or guarantee success with '
+                'every damaged file.',
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                'Keep Droid Vid Player open and the phone plugged in for '
+                'long recoveries. This first version keeps the screen awake '
+                'but does not yet support reliable background processing.',
+                style: TextStyle(color: Colors.amberAccent)),
+              const SizedBox(height: 18),
+              Text(_status, style: const TextStyle(fontSize: 16)),
+              if (_running) ...[
+                const SizedBox(height: 12),
+                const LinearProgressIndicator(),
+                const SizedBox(height: 8),
+                Text('Processed output time: ${_duration(_processed)}'
+                     '  ·  Frames: $_frames'),
+                const Text('Progress is not a percentage because damaged '
+                           'videos may report an incorrect duration.'),
+              ],
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                Text(_error!, style: const TextStyle(color: Colors.orangeAccent)),
+              ],
+              const SizedBox(height: 18),
+              if (!_running && _resultPath == null)
+                FilledButton.icon(
+                  onPressed: _start,
+                  icon: const Icon(Icons.auto_fix_high),
+                  label: const Text('Start Recover & Record'),
+                ),
+              if (_running)
+                OutlinedButton.icon(
+                  onPressed: _cancelling ? null : _cancel,
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: Text(_cancelling ? 'Stopping…' : 'Stop recovery'),
+                ),
+              if (_resultPath != null) ...[
+                const SizedBox(height: 12),
+                SelectableText('App copy: ${p.basename(_resultPath!)}'),
+                if (_savingGallery) const LinearProgressIndicator(),
+                if (_gallerySaved)
+                  const Text('Saved in Gallery / Droid Vid Player',
+                    style: TextStyle(color: Colors.greenAccent)),
+                if (!_gallerySaved && !_savingGallery)
+                  FilledButton.tonal(
+                    onPressed: _saveToGallery,
+                    child: const Text('Retry save to Gallery'),
+                  ),
+                FilledButton.icon(
+                  onPressed: locked ? null :
+                    () => Navigator.of(context).pop(_resultPath),
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Play recovered video'),
+                ),
+              ],
+              if (_partialPath != null)
+                const Text('Partial output was retained in private app '
+                    'storage for investigation. It may not be playable.'),
+              if (_logPath != null)
+                const Text('A recovery log was saved in private app storage.'),
+              const SizedBox(height: 14),
+              const Text('Original file is never overwritten.',
+                style: TextStyle(color: Colors.white70)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
