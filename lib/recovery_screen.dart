@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'raw_video_scan.dart';
 
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_session.dart';
@@ -10,7 +11,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-enum RecoveryMode { quickRepair, deepHighQuality }
+enum RecoveryMode { quickRepair, deepHighQuality, advancedAnalysis }
 
 /// Experimental forward-only repair or decode -> re-encode recovery. Never seeks, records
 /// only decoded media streams (not player UI), and never touches the original.
@@ -26,6 +27,9 @@ class RecoveryScreen extends StatefulWidget {
 
 class _RecoveryScreenState extends State<RecoveryScreen> {
   RecoveryMode _mode = RecoveryMode.deepHighQuality;
+  RawVideoScan? _scan;
+  double _scanProgress = 0;
+  bool _cancelScan = false;
   bool _running = false;
   bool _cancelling = false;
   bool _savingGallery = false;
@@ -61,8 +65,60 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     }
   }
 
+  Future<void> _analyzeRaw() async {
+    if (_running || _savingGallery) return;
+    final generation = ++_generation;
+    setState(() {
+      _running = true;
+      _cancelling = false;
+      _cancelScan = false;
+      _scan = null;
+      _scanProgress = 0;
+      _error = null;
+      _diagnostic = null;
+      _status = 'Analyzing video structure…';
+    });
+    try {
+      await _wake(true);
+      final scan = await scanRawVideo(widget.sourcePath,
+        isCancelled: () => _cancelScan || generation != _generation,
+        onProgress: (fraction) {
+          // Prevent expensive rebuilds on every file chunk.
+          if (!mounted || generation != _generation) return;
+          if (fraction - _scanProgress >= 0.02 || fraction >= 1) {
+            setState(() => _scanProgress = fraction);
+          }
+        },
+      );
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _scan = scan;
+        _diagnostic = scan.diagnostic;
+        _status = 'File analysis completed.';
+      });
+    } catch (e) {
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _status = _cancelScan ? 'Analysis cancelled.' : 'Analysis failed.';
+        if (!_cancelScan) _error = '$e';
+      });
+    } finally {
+      await _wake(false);
+      if (mounted && generation == _generation) {
+        setState(() {
+          _running = false;
+          _cancelling = false;
+        });
+      }
+    }
+  }
+
   Future<void> _start() async {
     if (_running || _savingGallery) return;
+    if (_mode == RecoveryMode.advancedAnalysis) {
+      await _analyzeRaw();
+      return;
+    }
     if (!await File(widget.sourcePath).exists()) {
       setState(() => _error = 'The selected file is no longer accessible. '
           'Reopen it with the file picker before retrying.');
@@ -232,6 +288,14 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
 
   Future<void> _cancel() async {
     if (!_running || _cancelling) return;
+    if (_mode == RecoveryMode.advancedAnalysis) {
+      setState(() {
+        _cancelScan = true;
+        _cancelling = true;
+        _status = 'Stopping analysis…';
+      });
+      return;
+    }
     setState(() {
       _cancelling = true;
       _status = 'Stopping recovery; waiting for the encoder…';
@@ -297,9 +361,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 overflow: TextOverflow.ellipsis),
               const SizedBox(height: 12),
               const Text(
-                'Choose how to rebuild this video. Both methods read forward '
-                'and create a separate file without recording player controls. '
-                'Neither method can recreate missing video data.',
+                'Choose a repair method or analyze the file first. Analysis '
+                'reads the file in small chunks, including for multi-GB files. '
+                'The original is never modified.',
               ),
               const SizedBox(height: 12),
               DropdownButton<RecoveryMode>(
@@ -318,17 +382,24 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                     value: RecoveryMode.deepHighQuality,
                     child: Text('Deep Recovery — high quality'),
                   ),
+                  DropdownMenuItem(
+                    value: RecoveryMode.advancedAnalysis,
+                    child: Text('Advanced Analysis — unknown source'),
+                  ),
                 ],
               ),
               Text(
                 _mode == RecoveryMode.quickRepair
-                    ? 'Copies the original compressed streams without quality '
-                      'loss. Faster, but some codecs cannot be placed in MP4 '
-                      'and badly broken timestamps may remain.'
-                    : 'Decodes recoverable frames and audio into a new MP4 '
-                      'using improved quality settings. Can fix problems '
-                      'Quick Repair cannot, but may still soften the picture '
-                      'and use more storage.',
+                    ? 'Copies original compressed streams without re-encoding '
+                      'when the container remains readable.'
+                    : _mode == RecoveryMode.deepHighQuality
+                        ? 'Decodes frames and audio into a new MP4. Requires '
+                          'FFmpeg to recognize the input container.'
+                        : 'Scans MP4 box markers and potential raw H.264/H.265 '
+                          'headers without loading the full video in memory. '
+                          'Analysis does not reconstruct a missing MP4 index, '
+                          'and detected byte signatures do not guarantee '
+                          'recoverable video.',
               ),
               const SizedBox(height: 14),
               const Text(
@@ -340,12 +411,18 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               Text(_status, style: const TextStyle(fontSize: 16)),
               if (_running) ...[
                 const SizedBox(height: 12),
-                const LinearProgressIndicator(),
+                _mode == RecoveryMode.advancedAnalysis
+                    ? LinearProgressIndicator(value: _scanProgress)
+                    : const LinearProgressIndicator(),
                 const SizedBox(height: 8),
-                Text('Processed output time: ${_duration(_processed)}'
-                     '  ·  Frames: $_frames'),
-                const Text('Progress is not a percentage because damaged '
-                           'videos may report an incorrect duration.'),
+                if (_mode == RecoveryMode.advancedAnalysis)
+                  Text('Analyzed: ${(_scanProgress * 100).toStringAsFixed(0)}%')
+                else ...[
+                  Text('Processed output time: ${_duration(_processed)}'
+                       '  ·  Frames: $_frames'),
+                  const Text('Progress is not a percentage because damaged '
+                             'videos may report an incorrect duration.'),
+                ],
               ],
               if (_error != null) ...[
                 const SizedBox(height: 12),
@@ -368,13 +445,17 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                   icon: const Icon(Icons.auto_fix_high),
                   label: Text(_mode == RecoveryMode.quickRepair
                       ? 'Start Quick Repair'
-                      : 'Start High-Quality Deep Recovery'),
+                      : _mode == RecoveryMode.deepHighQuality
+                          ? 'Start High-Quality Deep Recovery'
+                          : 'Analyze File Structure'),
                 ),
               if (_running)
                 OutlinedButton.icon(
                   onPressed: _cancelling ? null : _cancel,
                   icon: const Icon(Icons.stop_circle_outlined),
-                  label: Text(_cancelling ? 'Stopping…' : 'Stop recovery'),
+                  label: Text(_cancelling ? 'Stopping…' :
+                      _mode == RecoveryMode.advancedAnalysis
+                          ? 'Cancel analysis' : 'Stop recovery'),
                 ),
               if (_resultPath != null) ...[
                 const SizedBox(height: 12),
