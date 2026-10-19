@@ -124,10 +124,13 @@ Future<RawVideoScan> scanRawVideo(
           case 7:
             sps264++;
             start264 ??= absolute;
+            break;
           case 8:
             pps264++;
+            break;
           case 5:
             idr264++;
+            break;
         }
         final hevcType = (header >> 1) & 0x3f;
         if ((data[i + prefix + 1] & 7) != 0) {
@@ -135,14 +138,18 @@ Future<RawVideoScan> scanRawVideo(
             case 32:
               vps265++;
               start265 ??= absolute;
+              break;
             case 33:
               sps265++;
+              break;
             case 34:
               pps265++;
+              break;
             case 19:
             case 20:
             case 21:
               irap265++;
+              break;
           }
         }
       }
@@ -161,34 +168,3 @@ Future<RawVideoScan> scanRawVideo(
   );
 }
 
-/// Creates a separate temporary stream; never modifies the recovered source.
-/// Copying raw bytes is not itself a playable reconstruction.
-Future<void> copyRawTail(
-  String source,
-  String destination,
-  int startOffset, {
-  bool Function()? isCancelled,
-}) async {
-  final input = await File(source).open();
-  final output = File(destination).openWrite();
-  try {
-    await input.setPosition(startOffset);
-    while (true) {
-      if (isCancelled?.call() ?? false) {
-        throw const FileSystemException('Copy cancelled');
-      }
-      final bytes = await input.read(256 * 1024);
-      if (bytes.isEmpty) break;
-      output.add(bytes);
-    }
-    await output.flush();
-    await output.close();
-  } catch (_) {
-    await output.close();
-    final scratch = File(destination);
-    if (await scratch.exists()) await scratch.delete();
-    rethrow;
-  } finally {
-    await input.close();
-  }
-}
