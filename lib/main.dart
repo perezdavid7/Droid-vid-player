@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'guided_recovery_screen.dart';
 import 'android_compatibility_player.dart';
+import 'android_player_screen.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -22,7 +23,9 @@ class DroidVidPlayer extends StatelessWidget {
     debugShowCheckedModeBanner: false,
     title: 'Droid Vid Player',
     theme: ThemeData.dark(useMaterial3: true),
-    home: const PlayerScreen(),
+    home: Platform.isAndroid
+        ? AndroidMainPlayer(legacyBuilder: (_, source) => const PlayerScreen())
+        : const PlayerScreen(),
   );
 }
 
