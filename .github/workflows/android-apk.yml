@@ -6,12 +6,14 @@ on:
     branches: [main]
     paths:
       - 'lib/**'
+      - 'android/**'
       - 'pubspec.yaml'
       - 'scripts/**'
       - '.github/workflows/android-apk.yml'
   pull_request:
     paths:
       - 'lib/**'
+      - 'android/**'
       - 'pubspec.yaml'
       - 'scripts/**'
       - '.github/workflows/android-apk.yml'
