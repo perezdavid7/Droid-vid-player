@@ -41,6 +41,15 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   String? _error;
   Timer? _hideTimer;
 
+  static const _frameChannel = MethodChannel('droid_vid_player/frame_preview');
+  bool _nativePreviewReady = false;
+  bool _nativePreviewFailed = false;
+  bool _previewBusy = false;
+  bool _previewClosed = false;
+  Duration? _previewRequested;
+  Uint8List? _previewBytes;
+  int _previewGeneration = 0;
+
   bool _scrubbing = false;
   bool _finishingScrub = false;
   bool _scrubOnPicture = false;
@@ -72,6 +81,8 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     _scrubGeneration++;
     _slowGeneration++;
     _hideTimer?.cancel();
+    _previewClosed = true;
+    unawaited(_frameChannel.invokeMethod<void>('close').catchError((Object _) {}));
     final player = _video;
     if (player != null) {
       player.removeListener(_onVideoChanged);
@@ -161,6 +172,10 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     ++_slowGeneration;
     _hideTimer?.cancel();
     final old = _video;
+    ++_previewGeneration;
+    _nativePreviewReady = false;
+    _nativePreviewFailed = false;
+    _previewBytes = null;
     setState(() {
       _video = null;
       _loading = true;
@@ -192,6 +207,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       }
       await player.setLooping(_repeat);
       player.addListener(_onVideoChanged);
+      unawaited(_openPreview(source, generation));
       setState(() => _loading = false);
       await player.play();
       _autoHide();
@@ -252,6 +268,60 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     return (durationMs / width * 0.07).clamp(35.0, 450.0);
   }
 
+  Future<void> _openPreview(String source, int generation) async {
+    try {
+      final result = await _frameChannel.invokeMethod<bool>(
+        'open', <String, Object>{'path': source});
+      if (!mounted || generation != _fileGeneration) return;
+      _nativePreviewReady = result == true;
+    } catch (_) {
+      if (mounted && generation == _fileGeneration) {
+        _nativePreviewFailed = true;
+      }
+    }
+  }
+
+  void _pumpPreview() {
+    if (_previewBusy || _previewRequested == null ||
+        !_nativePreviewReady || _nativePreviewFailed || _previewClosed) {
+      return;
+    }
+    unawaited(_readPreview());
+  }
+
+  Future<void> _readPreview() async {
+    final source = _source;
+    final generation = _previewGeneration;
+    if (source == null) return;
+    _previewBusy = true;
+    try {
+      while (mounted && _scrubbing && generation == _previewGeneration) {
+        final at = _previewRequested;
+        _previewRequested = null;
+        if (at == null) break;
+        final bytes = await _frameChannel.invokeMethod<Uint8List>(
+          'frame', <String, Object>{
+            'path': source, 'timeMs': at.inMilliseconds,
+          }).timeout(const Duration(seconds: 4));
+        if (!mounted || !_scrubbing || generation != _previewGeneration) break;
+        if (bytes != null && bytes.isNotEmpty) {
+          setState(() => _previewBytes = bytes);
+        }
+      }
+    } catch (_) {
+      if (mounted && generation == _previewGeneration) {
+        _nativePreviewFailed = true;
+        setState(() => _previewBytes = null);
+      }
+    } finally {
+      _previewBusy = false;
+      if (mounted && _scrubbing && _previewRequested != null &&
+          generation == _previewGeneration && !_nativePreviewFailed) {
+        _pumpPreview();
+      }
+    }
+  }
+
   void _beginScrub({required bool picture, double width = 400}) {
     if (!_ready || _seekBroken || _scrubbing || _finishingScrub ||
         _slowHolding || _duration <= Duration.zero) {
@@ -259,6 +329,9 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     }
     final previouslyPlaying = _playing;
     ++_scrubGeneration;
+    ++_previewGeneration;
+    _previewBytes = null;
+    _previewRequested = null;
     _gestureWidth = width;
     _totalDrag = 0;
     _scrubStart = _position;
@@ -286,8 +359,13 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       return; // Stationary finger: keep displaying this exact frame.
     }
     setState(() => _scrubTarget = next);
-    _pendingSeek = next;
-    _startSeekPump();
+    if (_scrubOnPicture && _nativePreviewReady && !_nativePreviewFailed) {
+      _previewRequested = next;
+      _pumpPreview();
+    } else {
+      _pendingSeek = next;
+      _startSeekPump();
+    }
   }
 
   void _startSeekPump() {
@@ -352,6 +430,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     final resume = _resumeAfterScrub;
     final wasPictureGesture = _scrubOnPicture;
     _pendingSeek = null;
+    _previewRequested = null;
     setState(() {
       _scrubbing = false;
       _finishingScrub = true;
@@ -385,6 +464,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
         setState(() {
           _finishingScrub = false;
           _scrubOnPicture = false;
+          _previewBytes = null;
           _controlsVisible = !wasPictureGesture;
         });
         _autoHide();
@@ -706,6 +786,11 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
           const Center(child: CircularProgressIndicator())
         else if (_ready && _video != null)
           _picture(_video!)
+        if (_scrubbing && _scrubOnPicture && _previewBytes != null)
+          Positioned.fill(child: IgnorePointer(child: Center(
+            child: Image.memory(_previewBytes!,
+              gaplessPlayback: true, fit: BoxFit.contain),
+          )))
         else
           Center(child: Padding(
             padding: const EdgeInsets.all(20),
