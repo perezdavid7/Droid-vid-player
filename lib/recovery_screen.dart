@@ -3,9 +3,9 @@ import 'dart:io';
 import 'raw_video_scan.dart';
 import 'file_identification.dart';
 
-import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_session.dart';
-import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
+import 'package:ffmpeg_kit_flutter_new_min_gpl/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_min_gpl/ffmpeg_session.dart';
+import 'package:ffmpeg_kit_flutter_new_min_gpl/return_code.dart';
 import 'package:flutter/material.dart';
 import 'recovery_destination.dart';
 import 'package:path/path.dart' as p;
@@ -195,7 +195,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       final encodingArgs = _mode == RecoveryMode.quickRepair
           ? <String>['-c', 'copy']
           : <String>[
-              '-c:v', 'mpeg4', '-q:v', '2', '-pix_fmt', 'yuv420p',
+              '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+            '-pix_fmt', 'yuv420p',
               '-c:a', 'aac', '-b:a', '192k',
               '-af', 'aresample=async=1000:first_pts=0',
               '-fps_mode', 'vfr',
