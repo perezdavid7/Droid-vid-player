@@ -3,6 +3,8 @@ package com.example.droid_vid_player
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -21,6 +23,7 @@ import java.util.concurrent.Executors
  * coalesces movement so a fast-moving finger cannot queue old frames.
  */
 class MainActivity : FlutterActivity() {
+    private val mainThread = Handler(Looper.getMainLooper())
     private val channelName = "droid_vid_player/frame_preview"
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
     private var retriever: MediaMetadataRetriever? = null
@@ -57,12 +60,12 @@ class MainActivity : FlutterActivity() {
                                 targetHeight = maxOf(2, ((height * scale).toInt() / 2) * 2)
                                 retriever = media
                                 source = path
-                                result.success(true)
+                                mainThread.post { result.success(true) }
                             } catch (ex: Exception) {
                                 retriever?.release()
                                 retriever = null
                                 source = null
-                                result.error("FRAME_OPEN_FAILED", ex.message, null)
+                                mainThread.post { result.error("FRAME_OPEN_FAILED", ex.message, null) }
                             }
                         }
                     }
@@ -77,7 +80,7 @@ class MainActivity : FlutterActivity() {
                         worker.execute {
                             val media = retriever
                             if (media == null || source != path) {
-                                result.error("NOT_READY", "Frame decoder unavailable", null)
+                                mainThread.post { result.error("NOT_READY", "Frame decoder unavailable", null) }
                                 return@execute
                             }
                             var bitmap: Bitmap? = null
@@ -96,14 +99,15 @@ class MainActivity : FlutterActivity() {
                                     )
                                 }
                                 if (bitmap == null) {
-                                    result.error("NO_FRAME", "No frame decoded at $ms ms", null)
+                                    mainThread.post { result.error("NO_FRAME", "No frame decoded at $ms ms", null) }
                                 } else {
                                     val out = ByteArrayOutputStream(96 * 1024)
                                     bitmap.compress(Bitmap.CompressFormat.JPEG, 83, out)
-                                    result.success(out.toByteArray())
+                                    val encoded = out.toByteArray()
+                                    mainThread.post { result.success(encoded) }
                                 }
                             } catch (ex: Exception) {
-                                result.error("FRAME_FAILED", ex.message, null)
+                                mainThread.post { result.error("FRAME_FAILED", ex.message, null) }
                             } finally {
                                 bitmap?.recycle()
                             }
@@ -115,9 +119,9 @@ class MainActivity : FlutterActivity() {
                             retriever?.release()
                             retriever = null
                             source = null
-                            result.success(null)
+                            mainThread.post { result.success(null) }
                         } catch (ex: Exception) {
-                            result.error("FRAME_CLOSE_FAILED", ex.message, null)
+                            mainThread.post { result.error("FRAME_CLOSE_FAILED", ex.message, null) }
                         }
                     }
 
