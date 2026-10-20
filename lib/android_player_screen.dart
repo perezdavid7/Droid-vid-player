@@ -699,7 +699,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     final batch = await decoder.decode(
       sourcePath: source, before: _reversePosition);
     if (!mounted || !_reverseActive ||
-        generation != _reverseGeneration) return;
+        generation != _reverseGeneration) {
+      return;
+    }
     if (batch == null || batch.images.isEmpty) {
       setState(() {
         _reverseLoading = false;
