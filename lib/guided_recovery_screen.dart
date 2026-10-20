@@ -240,7 +240,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
 
   Future<_SeekCheck> _verifySeeking(String path) async {
     if (_cancelled) return _SeekCheck.failed;
-    if (mounted) setState(() => _status = 'Checking middle and late seeking…');
+    if (mounted) setState(() => _status = 'Checking five timeline positions…');
     double? seconds;
     try {
       final infoSession = await FFprobeKit.getMediaInformation(path)
@@ -258,7 +258,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
     }
     // Seek to two widely separated positions through FFmpeg's demuxer.
     // This is a bounded smoke test, not proof the whole timeline works.
-    for (final fraction in <double>[0.3, 0.75]) {
+    for (final fraction in <double>[0.1, 0.3, 0.5, 0.75, 0.9]) {
       if (_cancelled) return _SeekCheck.failed;
       final target = (seconds * fraction).toStringAsFixed(3);
       try {
@@ -417,7 +417,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
             _lastWasLossless = quick;
             _seekVerified = seekCheck == _SeekCheck.passed;
             _status = seekCheck == _SeekCheck.passed
-                ? 'Recovered copy passed initial decoding and two seek checks.'
+                ? 'Recovered copy passed initial decoding and five seek checks.'
                 : 'Playable copy created; seeking remains unverified.';
             _advice = seekCheck == _SeekCheck.passed
                 ? 'Sample positions decoded, but not every part of the '
@@ -568,7 +568,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
               if (_result != null) ...[
                 const SizedBox(height: 12),
                 if (_seekVerified)
-                  const Text('Sample seek checks passed; full playback untested.',
+                  const Text('Five sample seeks passed; full playback untested.',
                       style: TextStyle(color: Colors.greenAccent))
                 else
                   const Text('Seeking not confirmed; this file may still stall.',
