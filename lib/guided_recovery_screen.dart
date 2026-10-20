@@ -320,6 +320,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
       if (mounted) setState(() {
         _gallerySaved = true;
         _exportLabel = destination;
+        _status = 'Recovered copy saved to $destination.';
       });
     } catch (e) {
       if (mounted) setState(() {
