@@ -233,7 +233,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
     try {
       final infoSession = await FFprobeKit.getMediaInformation(path)
           .timeout(const Duration(seconds: 15));
-      final info = await infoSession.getMediaInformation();
+      final info = infoSession.getMediaInformation();
       seconds = double.tryParse(info?.getDuration() ?? '');
     } catch (e) {
       _attemptLogs.add('Unable to read media duration for seek checks: $e');
