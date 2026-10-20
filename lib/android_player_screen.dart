@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -515,7 +514,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       }
     }
     if (_swipeControl == _SwipeControl.continuous &&
-        _swipeMode == _SwipeMode.rewind) return;
+        _swipeMode == _SwipeMode.rewind) {
+      return;
+    }
     if (_swipeMode == _SwipeMode.preview ||
         _swipeMode == _SwipeMode.rewind) {
       if (!_scrubbing) return;
@@ -671,7 +672,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     try {
       await _video!.pause();
       if (!mounted || !_reverseActive ||
-          generation != _reverseGeneration) return;
+          generation != _reverseGeneration) {
+        return;
+      }
       await _loadReverseBatch(generation);
     } catch (e) {
       if (mounted && generation == _reverseGeneration) {
@@ -685,7 +688,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     final decoder = _reverseDecoder;
     final source = _path;
     if (decoder == null || source == null ||
-        generation != _reverseGeneration || !_reverseActive) return;
+        generation != _reverseGeneration || !_reverseActive) {
+      return;
+    }
     if (_reversePosition <= Duration.zero) {
       setState(() => _reverseLoading = false);
       return;
@@ -712,7 +717,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
 
   void _showReverseFrame(int generation) {
     if (!_reverseActive || generation != _reverseGeneration ||
-        !mounted) return;
+        !mounted) {
+      return;
+    }
     final batch = _reverseBatch;
     if (batch == null) return;
     if (_reverseIndex < 0) {
@@ -1188,19 +1195,19 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
             const Center(child: CircularProgressIndicator())
           else if (_ready && _video != null)
             _videoSurface(_video!)
-          if (_reverseActive && _reverseImage != null)
-            Positioned.fill(child: IgnorePointer(child: Center(
-              child: Image.memory(_reverseImage!, fit: BoxFit.contain,
-                gaplessPlayback: true),
-            )))
-          if (_reverseActive && _reverseLoading)
-            const Positioned(top: 115, left: 12, right: 12,
-              child: Center(child: Text('Buffering reverse frames…')))
           else
             Center(child: Padding(
               padding: const EdgeInsets.all(20),
               child: Text(_error ?? 'Video could not be opened.',
                 textAlign: TextAlign.center))),
+          if (_reverseActive && _reverseImage != null)
+            Positioned.fill(child: IgnorePointer(child: Center(
+              child: Image.memory(_reverseImage!, fit: BoxFit.contain,
+                gaplessPlayback: true),
+            ))),
+          if (_reverseActive && _reverseLoading)
+            const Positioned(top: 115, left: 12, right: 12,
+              child: Center(child: Text('Buffering reverse frames…'))),
           if ((_scrubbing && _swipeScrub) ||
               (_swipeActive && _swipeMode == _SwipeMode.forward))
             Positioned(top: 76, left: 8, right: 8, child: Center(
