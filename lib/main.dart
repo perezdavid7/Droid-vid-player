@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'guided_recovery_screen.dart';
+import 'android_compatibility_player.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -449,6 +450,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         label: const Text('Recover & Record'),
                       ),
                       const SizedBox(height: 8),
+                      if (Platform.isAndroid) ...[
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => AndroidCompatibilityPlayer(
+                                  sourcePath: source),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.play_circle_outline),
+                          label: const Text('Try Android compatibility player'),
+                        ),
+                        const SizedBox(height: 8),
+                      ],
                       OutlinedButton.icon(
                         onPressed: openFiles,
                         icon: const Icon(Icons.folder_open),
