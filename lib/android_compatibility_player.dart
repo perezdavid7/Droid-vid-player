@@ -51,19 +51,26 @@ class _AndroidCompatibilityPlayerState
   }
 
   void _onVideoChanged() {
-    if (mounted && _ready) setState(() {});
+    if (mounted && _ready) {
+      setState(() {});
+    }
   }
 
   Future<void> _seek(Duration target) async {
-    if (_seeking || !_ready) return;
+    if (_seeking || !_ready) {
+      return;
+    }
     setState(() => _seeking = true);
     try {
       await _video.seekTo(target).timeout(const Duration(seconds: 8));
     } catch (e) {
-      if (mounted) setState(() =>
-          _error = 'This video did not seek reliably: $e');
+      if (mounted) {
+        setState(() => _error = 'This video did not seek reliably: $e');
+      }
     } finally {
-      if (mounted) setState(() => _seeking = false);
+      if (mounted) {
+        setState(() => _seeking = false);
+      }
     }
   }
 
