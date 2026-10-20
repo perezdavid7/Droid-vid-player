@@ -525,7 +525,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
         .clamp(0, state.duration.inMilliseconds);
     _ignorePositionBackstepsUntil =
         DateTime.now().add(const Duration(seconds: 2));
-    await player.seek(Duration(milliseconds: ms));
+    setState(() => _seekInProgress = true);
+    try {
+      await player.seek(Duration(milliseconds: ms))
+          .timeout(const Duration(seconds: 4));
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _unreliableDuration = true;
+        error = 'Seeking stalled on this video. Further seek commands '
+            'have been disabled. Try Deep Recovery for a new timeline.';
+      });
+    } finally {
+      if (mounted) setState(() => _seekInProgress = false);
+    }
   }
 
   Future<void> _restartCurrent() async {
