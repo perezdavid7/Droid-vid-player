@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_min/ffprobe_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_session.dart';
 import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
 import 'package:flutter/material.dart';
@@ -26,6 +27,8 @@ class GuidedRecoveryScreen extends StatefulWidget {
   State<GuidedRecoveryScreen> createState() => _GuidedRecoveryScreenState();
 }
 
+enum _SeekCheck { passed, failed, inconclusive }
+
 class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
   FileIdentification? _identified;
   RawVideoScan? _scan;
@@ -34,6 +37,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
   bool _didDeepScan = false;
   bool _canAttempt = false;
   bool _gallerySaved = false;
+  bool _seekVerified = false;
   String? _result;
   String? _error;
   String _status = 'Inspecting file header…';
@@ -221,6 +225,67 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
     return success;
   }
 
+
+  Future<_SeekCheck> _verifySeeking(String path) async {
+    if (_cancelled) return _SeekCheck.failed;
+    if (mounted) setState(() => _status = 'Checking middle and late seeking…');
+    double? seconds;
+    try {
+      final infoSession = await FFprobeKit.getMediaInformation(path)
+          .timeout(const Duration(seconds: 15));
+      final info = await infoSession.getMediaInformation();
+      seconds = double.tryParse(info?.getDuration() ?? '');
+    } catch (e) {
+      _attemptLogs.add('Unable to read media duration for seek checks: $e');
+    }
+    if (seconds == null || !seconds.isFinite || seconds < 12 ||
+        seconds > 24 * 60 * 60) {
+      _attemptLogs.add('Seek safety not verified: duration unknown, '
+          'unreliable, or too short to sample.');
+      return _SeekCheck.inconclusive;
+    }
+    // Seek to two widely separated positions through FFmpeg's demuxer.
+    // This is a bounded smoke test, not proof the whole timeline works.
+    for (final fraction in <double>[0.3, 0.75]) {
+      if (_cancelled) return _SeekCheck.failed;
+      final target = (seconds * fraction).toStringAsFixed(3);
+      try {
+        final session = await _execute(<String>[
+          '-hide_banner', '-nostdin', '-loglevel', 'info',
+          '-ss', target,
+          '-i', path, '-map', '0:v:0', '-an',
+          '-frames:v', '3', '-f', 'null', '-',
+        ]).timeout(const Duration(seconds: 25));
+        final code = await session.getReturnCode();
+        final logs = await session.getLogsAsString();
+        final frameMatches = RegExp(r'frame=\s*(\d+)').allMatches(logs);
+        var decoded = _frames;
+        for (final match in frameMatches) {
+          final frames = int.tryParse(match.group(1) ?? '') ?? 0;
+          if (frames > decoded) decoded = frames;
+        }
+        if (!ReturnCode.isSuccess(code) || decoded <= 0) {
+          _attemptLogs.add('Seek check at $target seconds failed: '
+              'exit $code, decoded frames $decoded.');
+          return _SeekCheck.failed;
+        }
+      } on TimeoutException {
+        final id = _activeSession;
+        if (id != null) {
+          try {
+            await FFmpegKit.cancel(id).timeout(const Duration(seconds: 5));
+          } catch (_) {}
+        }
+        _attemptLogs.add('Seek check at $target seconds timed out.');
+        return _SeekCheck.failed;
+      } catch (e) {
+        _attemptLogs.add('Seek check at $target seconds raised: $e');
+        return _SeekCheck.failed;
+      }
+    }
+    return _SeekCheck.passed;
+  }
+
   Future<void> _deleteScratch(String path) async {
     try {
       final file = File(path);
@@ -242,14 +307,15 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
     }
   }
 
-  Future<void> _recover() async {
+  Future<void> _recover({bool deepOnly = false}) async {
     if (_running || !_canAttempt) return;
     setState(() {
       _running = true;
       _cancelled = false;
       _error = null;
-      _result = null;
-      _gallerySaved = false;
+      if (!deepOnly) _result = null;
+      if (!deepOnly) _gallerySaved = false;
+      _seekVerified = false;
       _attemptLogs.clear();
       _status = 'Preparing recovery…';
     });
@@ -280,7 +346,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
       ];
       // Matroska supports more stream-copy combinations than MP4 (such as
       // MPEG-2 + MP2 audio) and does not introduce compression artifacts.
-      for (final quick in <bool>[true, false]) {
+      for (final quick in (deepOnly ? <bool>[false] : <bool>[true, false])) {
         if (_cancelled) break;
         final ext = quick ? 'mkv' : 'mp4';
         workFile = p.join(dir.path,
@@ -312,18 +378,34 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
               '${quick ? 'Lossless remux' : 'Deep rebuild'}: exit $code\n$detail');
         }
         final valid = success && await _verifyVideo(workFile);
-        if (valid && !_cancelled) {
+        final seekCheck = valid
+            ? await _verifySeeking(workFile)
+            : _SeekCheck.failed;
+        // A copy that decodes only its first few frames is not a verified
+        // seekable repair. Try rebuilding its timestamps instead.
+        if (valid && seekCheck == _SeekCheck.failed && quick) {
+          _attemptLogs.add('Lossless copy decoded its first frames but '
+              'failed seek checks; trying Deep Recovery.');
+        }
+        if (valid && (seekCheck != _SeekCheck.failed || !quick) &&
+            !_cancelled) {
           await File(workFile).rename(outputFile);
           workFile = null;
           if (!mounted) return;
           setState(() {
             _result = outputFile;
-            _status = quick
-                ? 'Lossless recovered copy created and basic decoding verified.'
-                : 'Deep recovered copy created and basic decoding verified.';
-            _advice = 'The initial frames decoded successfully. '
-                'Full-length playback, audio sync, and seeking still '
-                'need to be checked on this output.';
+            _seekVerified = seekCheck == _SeekCheck.passed;
+            _status = seekCheck == _SeekCheck.passed
+                ? 'Recovered copy passed initial decoding and two seek checks.'
+                : 'Playable copy created; seeking remains unverified.';
+            _advice = seekCheck == _SeekCheck.passed
+                ? 'Initial decoding and sample seeks passed. Full-length '
+                  'playback, accurate timeline position, and audio sync '
+                  'still need to be tested. '
+                  'If this copy freezes, use the Deep Recovery option below.'
+                : 'This copy can decode initial frames, but its seeking '
+                  'could not be confirmed. Do not assume that forward '
+                  'and backward jumps are safe.';
           });
           await _saveGallery(outputFile);
           return;
@@ -450,6 +532,12 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
                 ),
               if (_result != null) ...[
                 const SizedBox(height: 12),
+                if (_seekVerified)
+                  const Text('Sample seek checks passed; full playback untested.',
+                      style: TextStyle(color: Colors.greenAccent))
+                else
+                  const Text('Seeking not confirmed; this file may still stall.',
+                      style: TextStyle(color: Colors.amberAccent)),
                 if (_gallerySaved)
                   const Text('Saved to Gallery / Droid Vid Player',
                       style: TextStyle(color: Colors.greenAccent)),
@@ -458,6 +546,13 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
                   icon: const Icon(Icons.play_arrow),
                   label: const Text('Play recovered copy'),
                 ),
+                const SizedBox(height: 8),
+                if (!_running)
+                  OutlinedButton.icon(
+                    onPressed: () => _recover(deepOnly: true),
+                    icon: const Icon(Icons.sync),
+                    label: const Text('Try Deep Recovery for better seeking'),
+                  ),
               ],
               if (!_running)
                 OutlinedButton.icon(
