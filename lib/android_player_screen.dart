@@ -1075,8 +1075,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     ]);
   }
 
-  Widget _swipeControlPicker() => Row(
-    mainAxisAlignment: MainAxisAlignment.center,
+  Widget _swipeControlPicker() => Wrap(
+    alignment: WrapAlignment.center,
+    crossAxisAlignment: WrapCrossAlignment.center,
     children: [
       const Text('Swipe:', style: TextStyle(fontSize: 12)),
       const SizedBox(width: 8),
