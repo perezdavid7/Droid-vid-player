@@ -7,7 +7,7 @@ import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_session.dart';
 import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
 import 'package:flutter/material.dart';
-import 'package:gal/gal.dart';
+import 'recovery_destination.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -36,6 +36,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   bool _cancelling = false;
   bool _savingGallery = false;
   bool _gallerySaved = false;
+  String? _exportLabel;
   String _status = 'Ready to begin recovery';
   String? _resultPath;
   String? _logPath;
@@ -327,23 +328,25 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   Future<void> _saveToGallery() async {
     final output = _resultPath;
     if (output == null || _savingGallery) return;
-    setState(() { _savingGallery = true; _error = null; });
+    setState(() {
+      _savingGallery = true;
+      _gallerySaved = false;
+      _error = null;
+      _status = 'Exporting to selected recovery destination…';
+    });
     try {
-      if (Platform.isAndroid) {
-        await Gal.putVideo(output, album: 'Droid Vid Player');
-      } else {
-        // On desktop, the app-documents file is retained for manual export.
-        throw UnsupportedError('Gallery export is available on Android.');
-      }
+      final destination = await RecoveryDestination.exportRecoveredVideo(output);
       if (!mounted) return;
       setState(() {
         _gallerySaved = true;
-        _status = 'Recovered video saved to your Gallery.';
+        _exportLabel = destination;
+        _status = 'Recovered video exported to $destination.';
       });
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = 'The video was recovered and retained in app '
-          'storage, but Gallery export failed: $e');
+      setState(() => _error = 'Recovery succeeded, but export failed: $e. '
+          'The app-stored copy is still available. Select another folder '
+          'and retry saving without repeating recovery.');
     } finally {
       if (mounted) setState(() => _savingGallery = false);
     }
@@ -415,6 +418,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                           'and detected byte signatures do not guarantee '
                           'recoverable video.',
               ),
+              const SizedBox(height: 12),
+              RecoveryDestinationPicker(disabled: locked),
               const SizedBox(height: 14),
               const Text(
                 'Keep Droid Vid Player open and the phone plugged in for '
@@ -511,12 +516,12 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 SelectableText('App copy: ${p.basename(_resultPath!)}'),
                 if (_savingGallery) const LinearProgressIndicator(),
                 if (_gallerySaved)
-                  const Text('Saved in Gallery / Droid Vid Player',
-                    style: TextStyle(color: Colors.greenAccent)),
+                  Text('Saved to: ${_exportLabel ?? "Selected destination"}',
+                    style: const TextStyle(color: Colors.greenAccent)),
                 if (!_gallerySaved && !_savingGallery)
                   FilledButton.tonal(
                     onPressed: _saveToGallery,
-                    child: const Text('Retry save to Gallery'),
+                    child: const Text('Retry save to selected folder'),
                   ),
                 FilledButton.icon(
                   onPressed: locked ? null :
