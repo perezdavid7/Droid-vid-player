@@ -2,10 +2,10 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
-import 'package:ffmpeg_kit_flutter_new_min/ffprobe_kit.dart';
-import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_session.dart';
-import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
+import 'package:ffmpeg_kit_flutter_new_min_gpl/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_min_gpl/ffprobe_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_min_gpl/ffmpeg_session.dart';
+import 'package:ffmpeg_kit_flutter_new_min_gpl/return_code.dart';
 import 'package:flutter/material.dart';
 import 'recovery_destination.dart';
 import 'package:path/path.dart' as p;
@@ -398,7 +398,8 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
             // Keep the previously field-tested manual Deep Recovery codec
             // settings. q:v=1 and setpts were experimental and produced an
             // MP4 that the Android player reported it could not decode.
-            '-c:v', 'mpeg4', '-q:v', '2', '-pix_fmt', 'yuv420p',
+            '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+            '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '192k',
             '-af', 'aresample=async=1000:first_pts=0',
             '-fps_mode', 'vfr',
