@@ -14,7 +14,7 @@ dependencies:
   media_kit_libs_video: ^1.0.7
   file_picker: ^13.1.0
   path: ^1.9.1
-  ffmpeg_kit_flutter_new_min: ^3.6.7
+  ffmpeg_kit_flutter_new_min_gpl: ^2.6.7
   gal: ^2.3.3
   path_provider: ^2.1.6
   wakelock_plus: ^1.8.1
