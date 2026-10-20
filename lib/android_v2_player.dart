@@ -41,6 +41,14 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   String? _error;
   Timer? _hideTimer;
 
+  static const _hardware = MethodChannel('droid_vid_player/hardware_scrub');
+  int? _previewTexture;
+  int? _previewSession;
+  bool _previewAvailable = true;
+  bool _previewOpening = false;
+  bool _previewFrameReady = false;
+  int _previewGeneration = 0;
+
   bool _scrubbing = false;
   bool _finishingScrub = false;
   bool _scrubOnPicture = false;
@@ -60,6 +68,66 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   int _slowGeneration = 0;
   Future<void>? _slowStartTask;
 
+  @override
+  void initState() {
+    super.initState();
+    _hardware.setMethodCallHandler(_onHardwareEvent);
+  }
+
+  Future<void> _onHardwareEvent(MethodCall call) async {
+    if (call.method == 'frameReady') {
+      final details = Map<Object?, Object?>.from(call.arguments as Map);
+      if (mounted && _scrubbing && _scrubOnPicture &&
+          details['session'] == _previewSession) {
+        setState(() => _previewFrameReady = true);
+      }
+    } else if (call.method == 'previewError') {
+      _previewAvailable = false;
+      if (mounted) setState(() => _previewFrameReady = false);
+    }
+  }
+
+  Future<void> _openHardwarePreview(int generation) async {
+    final source = _source;
+    if (source == null || _previewOpening || !_previewAvailable) return;
+    _previewOpening = true;
+    try {
+      final response = await _hardware.invokeMapMethod<String, dynamic>(
+        'open', <String, Object>{'path': source});
+      if (!mounted || generation != _previewGeneration ||
+          !_scrubbing || !_scrubOnPicture) {
+        unawaited(_hardware.invokeMethod<void>('close'));
+        return;
+      }
+      if (response != null) {
+        setState(() {
+          _previewTexture = (response['textureId'] as num).toInt();
+          _previewSession = (response['session'] as num).toInt();
+        });
+        _requestHardwareFrame();
+      }
+    } catch (_) {
+      _previewAvailable = false;
+    } finally {
+      _previewOpening = false;
+    }
+  }
+
+  void _requestHardwareFrame() {
+    if (_previewTexture == null || !_scrubbing ||
+        !_scrubOnPicture) return;
+    unawaited(_hardware.invokeMethod<void>('seek',
+      <String, Object>{'timeMs': _scrubTarget.inMilliseconds}));
+  }
+
+  void _closeHardwarePreview() {
+    _previewGeneration++;
+    _previewTexture = null;
+    _previewSession = null;
+    _previewFrameReady = false;
+    unawaited(_hardware.invokeMethod<void>('close').catchError((Object _) {}));
+  }
+
   bool get _ready => _video?.value.isInitialized == true;
   bool get _playing => _video?.value.isPlaying == true;
   Duration get _position => _ready ? _video!.value.position : Duration.zero;
@@ -72,6 +140,8 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     _scrubGeneration++;
     _slowGeneration++;
     _hideTimer?.cancel();
+    _hardware.setMethodCallHandler(null);
+    _closeHardwarePreview();
     final player = _video;
     if (player != null) {
       player.removeListener(_onVideoChanged);
@@ -161,6 +231,11 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     ++_slowGeneration;
     _hideTimer?.cancel();
     final old = _video;
+    _previewGeneration++;
+    _previewAvailable = true;
+    _previewTexture = null;
+    _previewSession = null;
+    _previewFrameReady = false;
     setState(() {
       _video = null;
       _loading = true;
@@ -267,6 +342,9 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     _pauseTask = previouslyPlaying ? _video!.pause() : Future<void>.value();
     _pendingSeek = null;
     _hideTimer?.cancel();
+    if (picture && _previewAvailable) {
+      unawaited(_openHardwarePreview(++_previewGeneration));
+    }
     setState(() {
       _scrubbing = true;
       _scrubOnPicture = picture;
@@ -286,8 +364,12 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       return; // Stationary finger: keep displaying this exact frame.
     }
     setState(() => _scrubTarget = next);
-    _pendingSeek = next;
-    _startSeekPump();
+    if (_scrubOnPicture && _previewAvailable) {
+      _requestHardwareFrame();
+    } else {
+      _pendingSeek = next;
+      _startSeekPump();
+    }
   }
 
   void _startSeekPump() {
@@ -386,6 +468,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
           _finishingScrub = false;
           _scrubOnPicture = false;
           _controlsVisible = !wasPictureGesture;
+          if (wasPictureGesture) _closeHardwarePreview();
         });
         _autoHide();
       }
@@ -711,6 +794,10 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
             padding: const EdgeInsets.all(20),
             child: Text(_error ?? 'Video unavailable.',
               textAlign: TextAlign.center))),
+        if ((_scrubbing || _finishingScrub) &&
+            _previewFrameReady && _previewTexture != null)
+          Positioned.fill(child: IgnorePointer(
+            child: Texture(textureId: _previewTexture!))),
         if (_scrubbing && _scrubOnPicture)
           _scrubOverlay(),
         if (_slowHolding)
