@@ -7,7 +7,7 @@ import 'package:ffmpeg_kit_flutter_new_min/ffprobe_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_session.dart';
 import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
 import 'package:flutter/material.dart';
-import 'package:gal/gal.dart';
+import 'recovery_destination.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -37,6 +37,8 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
   bool _didDeepScan = false;
   bool _canAttempt = false;
   bool _gallerySaved = false;
+  String? _exportLabel;
+  String? _exportError;
   bool _seekVerified = false;
   bool _preferReliablePlayback = false;
   bool _lastWasLossless = false;
@@ -307,15 +309,25 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
 
   Future<void> _saveGallery(String path) async {
     if (!Platform.isAndroid) return;
+    if (mounted) setState(() {
+      _gallerySaved = false;
+      _exportLabel = null;
+      _exportError = null;
+      _status = 'Saving recovered copy to selected destination…';
+    });
     try {
-      await Gal.putVideo(path, album: 'Droid Vid Player');
-      if (mounted) setState(() => _gallerySaved = true);
+      final destination = await RecoveryDestination.exportRecoveredVideo(path);
+      if (mounted) setState(() {
+        _gallerySaved = true;
+        _exportLabel = destination;
+      });
     } catch (e) {
-      if (mounted) {
-        setState(() => _advice =
-            'Recovery is saved in app storage, but Gallery export '
-            'failed. You can still play the recovered file.');
-      }
+      if (mounted) setState(() {
+        _exportError = 'Export failed: $e';
+        _advice = 'The playable recovered copy remains in app storage. '
+            'Choose a different output folder or retry saving; '
+            'you do not need to recover the video again.';
+      });
     }
   }
 
@@ -327,6 +339,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
       _error = null;
       if (!deepOnly) _result = null;
       if (!deepOnly) _gallerySaved = false;
+      _exportError = null;
       _seekVerified = false;
       _attemptLogs.clear();
       _status = 'Preparing recovery…';
@@ -375,10 +388,10 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
         final args = <String>[
           ...inputArgs,
           if (quick) ...['-c', 'copy'] else ...[
-            // MPEG-4 Part 2 is supported by the bundled minimal FFmpeg.
-            // q:v=1 is higher quality (and larger) than our previous q:v=2.
-            '-c:v', 'mpeg4', '-q:v', '1', '-pix_fmt', 'yuv420p',
-            '-vf', 'setpts=PTS-STARTPTS',
+            // Keep the previously field-tested manual Deep Recovery codec
+            // settings. q:v=1 and setpts were experimental and produced an
+            // MP4 that the Android player reported it could not decode.
+            '-c:v', 'mpeg4', '-q:v', '2', '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '192k',
             '-af', 'aresample=async=1000:first_pts=0',
             '-fps_mode', 'vfr',
@@ -509,6 +522,8 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
                 'original compression or prioritize reliable navigation. '
                 'Either approach creates a separate copy.',
               ),
+              const SizedBox(height: 12),
+              RecoveryDestinationPicker(disabled: _running),
               const SizedBox(height: 18),
               Text(_status, style: const TextStyle(fontSize: 16,
                   fontWeight: FontWeight.w600)),
@@ -574,8 +589,20 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
                   const Text('Seeking not confirmed; this file may still stall.',
                       style: TextStyle(color: Colors.amberAccent)),
                 if (_gallerySaved)
-                  const Text('Saved to Gallery / Droid Vid Player',
-                      style: TextStyle(color: Colors.greenAccent)),
+                  Text('Saved to: ${_exportLabel ?? "Selected destination"}',
+                      style: const TextStyle(color: Colors.greenAccent)),
+                if (_exportError != null) ...[
+                  Text(_exportError!,
+                      style: const TextStyle(color: Colors.orangeAccent)),
+                  OutlinedButton.icon(
+                    onPressed: _running ? null : () async {
+                      final path = _result;
+                      if (path != null) await _saveGallery(path);
+                    },
+                    icon: const Icon(Icons.save_alt),
+                    label: const Text('Retry saving recovered copy'),
+                  ),
+                ],
                 FilledButton.icon(
                   onPressed: () => Navigator.of(context).pop(_result),
                   icon: const Icon(Icons.play_arrow),
