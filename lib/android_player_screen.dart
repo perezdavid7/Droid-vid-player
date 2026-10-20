@@ -10,6 +10,8 @@ import 'package:video_player/video_player.dart';
 
 import 'guided_recovery_screen.dart';
 
+enum _SwipeMode { none, forward, rewind }
+
 /// Primary Android playback screen. ExoPlayer is provided by video_player on
 /// Android; the legacy MPV screen is optional for direct A/B comparisons.
 /// FFmpeg recovery remains an independent workflow.
@@ -61,6 +63,20 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   bool _seeking = false;
   int _seekGeneration = 0;
   double _swipeDirection = 0;
+
+  // Forward swipe is real accelerated playback, not repeated seek jumps.
+  // Reverse swipe remains frame-preview seeking until a buffered reverse
+  // decoder is available.
+  _SwipeMode _swipeMode = _SwipeMode.none;
+  bool _swipeActive = false;
+  bool _swipeWasPlaying = false;
+  bool _forwardRestoring = false;
+  int _forwardGeneration = 0;
+  double _forwardTravel = 0;
+  double _forwardSpeed = 1.5;
+  double _desiredForwardSpeed = 1.5;
+  double _appliedForwardSpeed = 1.0;
+  Future<void>? _forwardRateTask;
 
   bool _slowHolding = false;
   bool _slowWasPlaying = false;
@@ -156,6 +172,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     if (source == null) return;
     final generation = ++_openGeneration;
     _cancelScrub();
+    _forwardGeneration++;
+    _swipeMode = _SwipeMode.none;
+    _swipeActive = false;
     _resetZoom();
     _hideTimer?.cancel();
     final old = _controller;
@@ -434,19 +453,158 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   }
 
   void _beginSwipe(DragStartDetails details) {
-    if (_zoom > 1.02) return;
-    _beginScrub(_position, swipe: true);
+    if (!_ready || _zoom > 1.02 || _slowHolding || _scrubbing ||
+        _forwardRestoring || _swipeActive) {
+      return;
+    }
+    _hideTimer?.cancel();
+    _swipeActive = true;
+    _swipeWasPlaying = _playing;
+    _swipeMode = _SwipeMode.none;
+    _forwardTravel = 0;
+    _forwardSpeed = 1.5;
+    _swipeDirection = 0;
   }
 
   void _updateSwipe(DragUpdateDetails details) {
-    if (!_scrubbing || !_swipeScrub || _viewport.width <= 0) return;
-    // Time under the finger changes continuously. The most recent target
-    // wins and seeks are rate-limited to avoid flooding the decoder.
-    final msPerPixel = math.max(120.0,
-        _length.inMilliseconds / math.max(100.0, _viewport.width) * 0.30);
-    _swipeDirection = details.delta.dx.sign;
-    _updateScrub(_scrubAt + Duration(milliseconds:
-        (details.delta.dx * msPerPixel).round()));
+    if (!_swipeActive || !_ready || _viewport.width <= 0) return;
+    final dx = details.delta.dx;
+    // Commit to a direction only once the drag passes the initial threshold.
+    // While moving forward, use real ExoPlayer playback with adjustable speed.
+    // Moving backward uses our existing seek-based live preview.
+    if (_swipeMode == _SwipeMode.none) {
+      _forwardTravel += dx;
+      if (_forwardTravel.abs() < 6) return;
+      if (_forwardTravel > 0) {
+        _swipeMode = _SwipeMode.forward;
+        _forwardGeneration++;
+        _appliedForwardSpeed = _speed;
+        _hideTimer?.cancel();
+        setState(() {
+          _controlsVisible = false;
+          _swipeDirection = 1;
+        });
+      } else {
+        _swipeMode = _SwipeMode.rewind;
+        _beginScrub(_position, swipe: true);
+        // Gesture initiation has not yet moved the video.
+        _forwardTravel = 0;
+      }
+    }
+    if (_swipeMode == _SwipeMode.forward) {
+      _forwardTravel = (_forwardTravel + dx).clamp(0.0, _viewport.width);
+      final progress = (_forwardTravel / math.max(100, _viewport.width))
+          .clamp(0.0, 1.0);
+      // Quantized rates limit native speed changes and audio glitches.
+      final rate = (1.5 + progress * 4.5);
+      final quantized = (rate * 2).round() / 2.0;
+      _desiredForwardSpeed = quantized.clamp(1.5, 6.0);
+      if ((_forwardSpeed - _desiredForwardSpeed).abs() > 0.01) {
+        setState(() => _forwardSpeed = _desiredForwardSpeed);
+      }
+      _queueForwardRate();
+    } else if (_swipeMode == _SwipeMode.rewind) {
+      if (!_scrubbing) return;
+      final msPerPixel = math.max(120.0,
+          _length.inMilliseconds / math.max(100.0, _viewport.width) * 0.30);
+      _swipeDirection = dx.sign;
+      _updateScrub(_scrubAt + Duration(milliseconds:
+          (dx * msPerPixel).round()));
+    }
+  }
+
+  void _queueForwardRate() {
+    if (!_swipeActive || _swipeMode != _SwipeMode.forward ||
+        _forwardRateTask != null) {
+      return;
+    }
+    _forwardRateTask = _applyForwardRates(_forwardGeneration);
+  }
+
+  Future<void> _applyForwardRates(int generation) async {
+    final video = _video;
+    try {
+      while (mounted && _swipeActive &&
+          _swipeMode == _SwipeMode.forward &&
+          generation == _forwardGeneration &&
+          identical(video, _video) && _ready) {
+        final desired = _desiredForwardSpeed;
+        if ((desired - _appliedForwardSpeed).abs() < 0.01 &&
+            video!.value.isPlaying) {
+          break;
+        }
+        // Keep at most one native speed change in flight, avoiding decoder
+        // command flooding during rapid finger motion.
+        await video!.setPlaybackSpeed(desired)
+            .timeout(const Duration(seconds: 3));
+        _appliedForwardSpeed = desired;
+        if (!video.value.isPlaying) {
+          await video.play().timeout(const Duration(seconds: 3));
+        }
+        if ((desired - _desiredForwardSpeed).abs() < 0.01) break;
+      }
+    } catch (e) {
+      if (mounted && _swipeMode == _SwipeMode.forward &&
+          generation == _forwardGeneration) {
+        setState(() => _error = 'Forward playback speed unavailable: $e');
+      }
+    } finally {
+      _forwardRateTask = null;
+      // A last speed change can arrive just before the previous command
+      // completes. Queue that latest requested speed once, without overlap.
+      if (mounted && _swipeActive &&
+          _swipeMode == _SwipeMode.forward &&
+          generation == _forwardGeneration &&
+          (_desiredForwardSpeed - _appliedForwardSpeed).abs() > 0.01) {
+        // If a native rate command errored, do not retry indefinitely.
+        if (_error?.startsWith('Forward playback speed unavailable:') != true) {
+          _queueForwardRate();
+        }
+      }
+    }
+  }
+
+  Future<void> _endSwipe() async {
+    if (!_swipeActive) return;
+    final mode = _swipeMode;
+    _swipeActive = false;
+    _swipeMode = _SwipeMode.none;
+    if (mode == _SwipeMode.rewind) {
+      await _endScrub();
+    } else if (mode == _SwipeMode.forward) {
+      _forwardRestoring = true;
+      final generation = _forwardGeneration;
+      final video = _video;
+      final wasPlaying = _swipeWasPlaying;
+      try {
+        await _forwardRateTask;
+        if (generation == _forwardGeneration && identical(video, _video) &&
+            _ready) {
+          await video!.setPlaybackSpeed(_speed)
+              .timeout(const Duration(seconds: 3));
+          if (wasPlaying) {
+            await video.play().timeout(const Duration(seconds: 3));
+          } else {
+            await video.pause().timeout(const Duration(seconds: 3));
+          }
+        }
+      } catch (e) {
+        if (mounted && generation == _forwardGeneration) {
+          setState(() => _error = 'Could not restore playback speed: $e');
+        }
+      } finally {
+        _forwardRestoring = false;
+        if (mounted && generation == _forwardGeneration) {
+          setState(() {
+            _controlsVisible = true;
+            _forwardSpeed = _speed;
+          });
+          _scheduleHide();
+        }
+      }
+    } else {
+      _wakeControls();
+    }
   }
 
   void _beginSlow(LongPressStartDetails details) {
@@ -556,6 +714,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   void dispose() {
     _openGeneration++;
     _cancelScrub();
+    _forwardGeneration++;
+    _swipeActive = false;
+    _swipeMode = _SwipeMode.none;
     _hideTimer?.cancel();
     _transform.removeListener(_onTransformChanged);
     _transform.dispose();
@@ -599,9 +760,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
         onHorizontalDragStart: _zoom > 1.02 ? null : _beginSwipe,
         onHorizontalDragUpdate: _zoom > 1.02 ? null : _updateSwipe,
         onHorizontalDragEnd: _zoom > 1.02 ? null : (_) =>
-            unawaited(_endScrub()),
+            unawaited(_endSwipe()),
         onHorizontalDragCancel: _zoom > 1.02 ? null : () =>
-            unawaited(_endScrub()),
+            unawaited(_endSwipe()),
         child: InteractiveViewer(
           transformationController: _transform,
           minScale: 1,
@@ -845,7 +1006,8 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
               padding: const EdgeInsets.all(20),
               child: Text(_error ?? 'Video could not be opened.',
                 textAlign: TextAlign.center))),
-          if (_scrubbing && _swipeScrub)
+          if ((_scrubbing && _swipeScrub) ||
+              (_swipeActive && _swipeMode == _SwipeMode.forward))
             Positioned(top: 76, left: 8, right: 8, child: Center(
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -854,7 +1016,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
                 child: Padding(
                   padding: const EdgeInsets.all(12),
                   child: Text(
-                    '${_swipeDirection < 0 ? '◀ Rewind' : 'Fast forward ▶'}   ${_clock(_scrubAt)}',
+                    _swipeMode == _SwipeMode.forward
+                        ? 'Fast forward ${_forwardSpeed.toStringAsFixed(1)}× ▶▶   ${_clock(_position)}'
+                        : '◀ Rewind preview   ${_clock(_scrubAt)}',
                     style: const TextStyle(fontSize: 20)),
                 ),
               ),
