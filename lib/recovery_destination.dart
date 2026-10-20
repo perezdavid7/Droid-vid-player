@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:gal/gal.dart';
 import 'package:path/path.dart' as p;
 import 'package:saf/saf.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -35,6 +36,19 @@ class RecoveryDestination {
   static Future<void> useGallery() async {
     await _prefs.remove(_uriKey);
     await _prefs.remove(_labelKey);
+  }
+
+  static Future<String> exportRecoveredVideo(String localPath) async {
+    final uri = await selectedUri();
+    if (uri == null || uri.isEmpty) {
+      if (!Platform.isAndroid) {
+        throw UnsupportedError('Gallery export requires Android.');
+      }
+      await Gal.putVideo(localPath, album: 'Droid Vid Player');
+      return 'Gallery / Droid Vid Player';
+    }
+    await exportToChosenFolder(localPath);
+    return await selectedLabel();
   }
 
   static Future<String?> exportToChosenFolder(String localPath) async {
