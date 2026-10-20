@@ -100,10 +100,12 @@ class _RecoveryDestinationPickerState extends State<RecoveryDestinationPicker> {
     try {
       final uri = await RecoveryDestination.selectedUri();
       final label = await RecoveryDestination.selectedLabel();
-      if (mounted) setState(() {
-        _custom = uri != null && uri.isNotEmpty;
-        _label = label;
-      });
+      if (mounted) {
+        setState(() {
+          _custom = uri != null && uri.isNotEmpty;
+          _label = label;
+        });
+      }
     } catch (e) {
       if (mounted) setState(() => _error = 'Cannot read saved folder: $e');
     }
