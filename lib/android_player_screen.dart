@@ -45,7 +45,6 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   final TransformationController _transform = TransformationController();
   double _zoom = 1;
   Size _viewport = Size.zero;
-  Offset _doubleTapPoint = Offset.zero;
 
   bool _scrubbing = false;
   bool _swipeScrub = false;
@@ -126,14 +125,15 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   Future<void> openFiles() async {
     try {
       final picked = await FilePicker.pickFiles(
-        type: FileType.any, allowMultiple: true);
+        type: FileType.any);
       final paths = picked.map((f) => f.path)
           .whereType<String>()
           .where((path) => _extensions.contains(p.extension(path).toLowerCase()))
           .toList();
       if (paths.isEmpty) {
-        if (mounted) setState(() => _error =
-            'No supported video files were selected.');
+        if (mounted) {
+          setState(() => _error = 'No supported video files were selected.');
+        }
         return;
       }
       await _loadPlaylist(paths);
@@ -244,8 +244,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       await _video!.setPlaybackSpeed(rate);
       if (mounted) setState(() => _speed = rate);
     } catch (e) {
-      if (mounted) setState(() =>
-          _error = 'Playback speed $rate is unavailable: $e');
+      if (mounted) {
+        setState(() => _error = 'Playback speed $rate is unavailable: $e');
+      }
     }
   }
 
@@ -281,11 +282,13 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       await future.timeout(const Duration(seconds: 6));
       return true;
     } catch (e) {
-      if (mounted) setState(() {
-        _seekFailed = true;
-        _error = 'Seeking stalled. Open the video again to reset the decoder. '
-            'Details: $e';
-      });
+      if (mounted) {
+        setState(() {
+          _seekFailed = true;
+          _error = 'Seeking stalled. Open the video again to reset the decoder. '
+              'Details: $e';
+        });
+      }
       return false;
     } finally {
       if (identical(_nativeSeek, future)) _nativeSeek = null;
@@ -338,18 +341,20 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     try {
       await _pauseJob;
       if (!mounted || !_scrubbing || generation != _seekGeneration ||
-          _seekFailed) return;
+          _seekFailed) {
+        return;
+      }
       final target = _pendingPreview;
       _pendingPreview = null;
-      if (target != null) await _seekTo(target);
+      if (target != null) {
+        await _seekTo(target);
+      }
     } finally {
       _previewJob = null;
       if (mounted && _scrubbing && _pendingPreview != null && !_seekFailed) {
         _previewTimer?.cancel();
         _previewTimer = Timer(const Duration(milliseconds: 180), () {
-          if (_previewJob == null) {
-            _previewJob = _previewCurrent(generation);
-          }
+          _previewJob ??= _previewCurrent(generation);
         });
       }
     }
@@ -426,10 +431,12 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       if (mounted) setState(() => _error = 'Could not restore speed: $e');
     } finally {
       _slowEnding = false;
-      if (mounted) setState(() {
-        _slowHolding = false;
-        _controlsVisible = true;
-      });
+      if (mounted) {
+        setState(() {
+          _slowHolding = false;
+          _controlsVisible = true;
+        });
+      }
       _scheduleHide();
     }
   }
@@ -528,8 +535,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
             _wakeControls();
           }
         },
-        onDoubleTapDown: (details) => _doubleTapPoint = details.localPosition,
-        onDoubleTap: () {
+                onDoubleTap: () {
           if (_zoom > 1.05) {
             _resetZoom();
           } else {
@@ -797,8 +803,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
                 child: Padding(
                   padding: const EdgeInsets.all(12),
                   child: Text(
-                    (_swipeDirection < 0 ? '◀ Rewind' : 'Fast forward ▶') +
-                        '   ' + _clock(_scrubAt),
+                    '${_swipeDirection < 0 ? '◀ Rewind' : 'Fast forward ▶'}   ${_clock(_scrubAt)}',
                     style: const TextStyle(fontSize: 20)),
                 ),
               ),
