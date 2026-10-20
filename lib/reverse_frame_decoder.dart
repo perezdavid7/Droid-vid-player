@@ -11,7 +11,7 @@ import 'package:path_provider/path_provider.dart';
 /// FFmpeg decodes a short span FORWARD; the UI displays those decoded frames
 /// in reverse sequence. No timestamp jumps are used to animate rewind.
 ///
-/// Experimental limitations: thumbnails are silent at 640 px / 12 fps;
+/// Experimental limitations: thumbnails are silent at 480 px / 12 fps;
 /// codec seek accuracy and background decode throughput are file-dependent.
 class ReverseFrameBatch {
   final Duration start;
@@ -37,6 +37,7 @@ class ReverseFrameBatch {
 class ReverseFrameDecoder {
   static const int fps = 12;
   static const int chunkMillis = 2000;
+  static const int initialChunkMillis = 900;
   bool _closed = false;
   int? _sessionId;
   Directory? _workRoot;
@@ -45,10 +46,11 @@ class ReverseFrameDecoder {
   Future<ReverseFrameBatch?> decode({
     required String sourcePath,
     required Duration before,
+    int windowMillis = chunkMillis,
   }) async {
     if (_closed || before <= Duration.zero) return null;
     final endMs = before.inMilliseconds;
-    final startMs = (endMs - chunkMillis).clamp(0, endMs);
+    final startMs = (endMs - windowMillis.clamp(300, 3000)).clamp(0, endMs);
     final spanMs = endMs - startMs;
     if (spanMs <= 0) return null;
     _workRoot ??= await Directory(
@@ -66,11 +68,13 @@ class ReverseFrameDecoder {
       final args = <String>[
         '-hide_banner', '-nostdin', '-loglevel', 'error',
         '-y', '-ss', (startMs / 1000).toStringAsFixed(3),
+        '-threads', '2',
         '-i', sourcePath,
         '-t', (spanMs / 1000).toStringAsFixed(3),
         '-map', '0:v:0', '-an', '-sn', '-dn',
-        '-vf', 'fps=$fps,scale=640:-2:force_original_aspect_ratio=decrease',
-        '-c:v', 'mjpeg', '-q:v', '5', '-f', 'image2', output,
+        '-vf', 'fps=$fps,scale=480:-2:force_original_aspect_ratio=decrease',
+        '-frames:v', '${(spanMs * fps / 1000).ceil() + 2}',
+        '-c:v', 'mjpeg', '-q:v', '6', '-f', 'image2', output,
       ];
       final session = await FFmpegKit.executeWithArgumentsAsync(
         args,
