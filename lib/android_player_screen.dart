@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -9,9 +10,10 @@ import 'package:path/path.dart' as p;
 import 'package:video_player/video_player.dart';
 
 import 'guided_recovery_screen.dart';
+import 'reverse_frame_decoder.dart';
 
 enum _SwipeMode { none, preview, forward, rewind }
-enum _SwipeControl { preview, speed }
+enum _SwipeControl { preview, speed, continuous }
 
 /// Primary Android playback screen. ExoPlayer is provided by video_player on
 /// Android; the legacy MPV screen is optional for direct A/B comparisons.
@@ -79,6 +81,18 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   double _lastSwipeDx = 0;
   double _appliedForwardSpeed = 1.0;
   Future<void>? _forwardRateTask;
+
+  ReverseFrameDecoder? _reverseDecoder;
+  ReverseFrameBatch? _reverseBatch;
+  Uint8List? _reverseImage;
+  Duration _reversePosition = Duration.zero;
+  Timer? _reverseTimer;
+  bool _reverseActive = false;
+  bool _reverseLoading = false;
+  bool _reverseWasPlaying = false;
+  int _reverseGeneration = 0;
+  int _reverseIndex = -1;
+  bool _reverseStopping = false;
 
   bool _slowHolding = false;
   bool _slowWasPlaying = false;
@@ -174,6 +188,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     if (source == null) return;
     final generation = ++_openGeneration;
     _cancelScrub();
+    _stopReverse();
     _forwardGeneration++;
     _swipeMode = _SwipeMode.none;
     _swipeActive = false;
@@ -472,6 +487,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     _lastSwipeDx = 0;
     _forwardSpeed = 2.0;
     _desiredForwardSpeed = 2.0;
+    if (_swipeControl == _SwipeControl.continuous) return;
     if (_swipeControl == _SwipeControl.preview) {
       // Preview mode does not change actual playback speed. Live seek
       // frames in EITHER direction as the finger moves.
@@ -484,6 +500,22 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     if (!_swipeActive || !_ready || _viewport.width <= 0) return;
     final dx = details.delta.dx;
     _lastSwipeDx = dx;
+    if (_swipeControl == _SwipeControl.continuous &&
+        _swipeMode == _SwipeMode.none) {
+      _forwardTravel += dx;
+      if (_forwardTravel.abs() < 6) return;
+      if (_forwardTravel < 0) {
+        _swipeMode = _SwipeMode.rewind;
+        unawaited(_startReverse());
+      } else {
+        _swipeMode = _SwipeMode.forward;
+        _forwardGeneration++;
+        _appliedForwardSpeed = _speed;
+        setState(() => _controlsVisible = false);
+      }
+    }
+    if (_swipeControl == _SwipeControl.continuous &&
+        _swipeMode == _SwipeMode.rewind) return;
     if (_swipeMode == _SwipeMode.preview ||
         _swipeMode == _SwipeMode.rewind) {
       if (!_scrubbing) return;
@@ -585,7 +617,9 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     final mode = _swipeMode;
     _swipeActive = false;
     _swipeMode = _SwipeMode.none;
-    if (mode == _SwipeMode.rewind || mode == _SwipeMode.preview) {
+    if (mode == _SwipeMode.rewind && _reverseActive) {
+      await _finishReverse();
+    } else if (mode == _SwipeMode.rewind || mode == _SwipeMode.preview) {
       await _endScrub();
     } else if (mode == _SwipeMode.forward) {
       _forwardRestoring = true;
@@ -620,6 +654,113 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       }
     } else {
       _wakeControls();
+    }
+  }
+
+  Future<void> _startReverse() async {
+    if (!_ready || _path == null || _reverseActive) return;
+    final generation = ++_reverseGeneration;
+    _reverseWasPlaying = _swipeWasPlaying;
+    _reversePosition = _position;
+    _reverseDecoder = ReverseFrameDecoder();
+    setState(() {
+      _reverseActive = true;
+      _reverseLoading = true;
+      _controlsVisible = false;
+    });
+    try {
+      await _video!.pause();
+      if (!mounted || !_reverseActive ||
+          generation != _reverseGeneration) return;
+      await _loadReverseBatch(generation);
+    } catch (e) {
+      if (mounted && generation == _reverseGeneration) {
+        setState(() => _error = 'Reverse decoder: $e');
+        await _finishReverse();
+      }
+    }
+  }
+
+  Future<void> _loadReverseBatch(int generation) async {
+    final decoder = _reverseDecoder;
+    final source = _path;
+    if (decoder == null || source == null ||
+        generation != _reverseGeneration || !_reverseActive) return;
+    if (_reversePosition <= Duration.zero) {
+      setState(() => _reverseLoading = false);
+      return;
+    }
+    setState(() => _reverseLoading = true);
+    final batch = await decoder.decode(
+      sourcePath: source, before: _reversePosition);
+    if (!mounted || !_reverseActive ||
+        generation != _reverseGeneration) return;
+    if (batch == null || batch.images.isEmpty) {
+      setState(() {
+        _reverseLoading = false;
+        _error = 'Reverse frames unavailable for this section.';
+      });
+      return;
+    }
+    _reverseBatch = batch;
+    _reverseIndex = batch.images.length - 1;
+    _showReverseFrame(generation);
+    _reverseTimer?.cancel();
+    _reverseTimer = Timer.periodic(
+      const Duration(milliseconds: 83), (_) => _showReverseFrame(generation));
+  }
+
+  void _showReverseFrame(int generation) {
+    if (!_reverseActive || generation != _reverseGeneration ||
+        !mounted) return;
+    final batch = _reverseBatch;
+    if (batch == null) return;
+    if (_reverseIndex < 0) {
+      _reverseTimer?.cancel();
+      _reversePosition = batch.start;
+      unawaited(_loadReverseBatch(generation));
+      return;
+    }
+    final index = _reverseIndex--;
+    setState(() {
+      _reverseImage = batch.images[index];
+      _reversePosition = batch.positionFor(index);
+      _reverseLoading = false;
+    });
+  }
+
+  void _stopReverse() {
+    _reverseGeneration++;
+    _reverseTimer?.cancel();
+    _reverseTimer = null;
+    _reverseActive = false;
+    _reverseLoading = false;
+    _reverseBatch = null;
+    _reverseImage = null;
+    _reverseIndex = -1;
+    final decoder = _reverseDecoder;
+    _reverseDecoder = null;
+    if (decoder != null) unawaited(decoder.dispose());
+  }
+
+  Future<void> _finishReverse() async {
+    if (!_reverseActive || _reverseStopping) return;
+    _reverseStopping = true;
+    final position = _reversePosition;
+    final resume = _reverseWasPlaying;
+    final video = _video;
+    _stopReverse();
+    if (mounted) setState(() => _controlsVisible = true);
+    try {
+      if (video != null && mounted && _ready) {
+        await _seekTo(position);
+        if (resume) await video.play();
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Reverse exit failed: $e');
+    } finally {
+      _reverseStopping = false;
+      _scheduleHide();
     }
   }
 
@@ -730,6 +871,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   void dispose() {
     _openGeneration++;
     _cancelScrub();
+    _stopReverse();
     _forwardGeneration++;
     _swipeActive = false;
     _swipeMode = _SwipeMode.none;
@@ -908,7 +1050,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   Widget _timeline() {
     final totalMs = _length.inMilliseconds.toDouble();
     final max = totalMs > 0 ? totalMs : 1.0;
-    final current = _scrubbing ? _scrubAt : _position;
+    final current = _reverseActive ? _reversePosition : (_scrubbing ? _scrubAt : _position);
     final value = current.inMilliseconds.toDouble().clamp(0.0, max);
     return Row(children: [
       Text(_clock(current), style: const TextStyle(fontSize: 12)),
@@ -936,6 +1078,13 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
         selected: _swipeControl == _SwipeControl.preview,
         visualDensity: VisualDensity.compact,
         onSelected: (_) => _selectSwipeControl(_SwipeControl.preview),
+      ),
+      const SizedBox(width: 8),
+      ChoiceChip(
+        label: const Text('Continuous'),
+        selected: _swipeControl == _SwipeControl.continuous,
+        visualDensity: VisualDensity.compact,
+        onSelected: (_) => _selectSwipeControl(_SwipeControl.continuous),
       ),
       const SizedBox(width: 8),
       ChoiceChip(
@@ -1039,6 +1188,14 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
             const Center(child: CircularProgressIndicator())
           else if (_ready && _video != null)
             _videoSurface(_video!)
+          if (_reverseActive && _reverseImage != null)
+            Positioned.fill(child: IgnorePointer(child: Center(
+              child: Image.memory(_reverseImage!, fit: BoxFit.contain,
+                gaplessPlayback: true),
+            )))
+          if (_reverseActive && _reverseLoading)
+            const Positioned(top: 115, left: 12, right: 12,
+              child: Center(child: Text('Buffering reverse frames…')))
           else
             Center(child: Padding(
               padding: const EdgeInsets.all(20),
