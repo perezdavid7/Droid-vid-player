@@ -309,26 +309,32 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
 
   Future<void> _saveGallery(String path) async {
     if (!Platform.isAndroid) return;
-    if (mounted) setState(() {
-      _gallerySaved = false;
-      _exportLabel = null;
-      _exportError = null;
-      _status = 'Saving recovered copy to selected destination…';
-    });
+    if (mounted) {
+      setState(() {
+        _gallerySaved = false;
+        _exportLabel = null;
+        _exportError = null;
+        _status = 'Saving recovered copy to selected destination…';
+      });
+    }
     try {
       final destination = await RecoveryDestination.exportRecoveredVideo(path);
-      if (mounted) setState(() {
-        _gallerySaved = true;
-        _exportLabel = destination;
-        _status = 'Recovered copy saved to $destination.';
-      });
+      if (mounted) {
+        setState(() {
+          _gallerySaved = true;
+          _exportLabel = destination;
+          _status = 'Recovered copy saved to $destination.';
+        });
+      }
     } catch (e) {
-      if (mounted) setState(() {
-        _exportError = 'Export failed: $e';
-        _advice = 'The playable recovered copy remains in app storage. '
-            'Choose a different output folder or retry saving; '
-            'you do not need to recover the video again.';
-      });
+      if (mounted) {
+        setState(() {
+          _exportError = 'Export failed: $e';
+          _advice = 'The playable recovered copy remains in app storage. '
+              'Choose a different output folder or retry saving; '
+              'you do not need to recover the video again.';
+        });
+      }
     }
   }
 
