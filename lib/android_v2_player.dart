@@ -93,7 +93,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   String _relativeTime(Duration delta) {
     final sign = delta.isNegative ? '-' : '+';
     final absolute = Duration(milliseconds: delta.inMilliseconds.abs());
-    return '(' + sign + _clock(absolute) + ')';
+    return '($sign${_clock(absolute)})';
   }
 
   void _onVideoChanged() {
