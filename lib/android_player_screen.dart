@@ -53,6 +53,8 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   Duration? _pendingPreview;
   Timer? _previewTimer;
   Future<void>? _previewJob;
+  DateTime _lastPreviewStarted = DateTime.fromMillisecondsSinceEpoch(0);
+  static const _previewInterval = Duration(milliseconds: 140);
   Future<void>? _pauseJob;
   Future<void>? _nativeSeek;
   bool _seekFailed = false;
@@ -118,8 +120,8 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       unawaited(_skipFile(1));
       return;
     }
+    // Do not restart the auto-hide timer on each decoder position update.
     setState(() {});
-    if (value.isPlaying && _controlsVisible) _scheduleHide();
   }
 
   Future<void> openFiles() async {
@@ -311,8 +313,14 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     }
     _seekGeneration++;
     _previewTimer?.cancel();
-    _pauseJob = _playing ? _video!.pause() : Future<void>.value();
-    _resumeAfterScrub = _playing;
+    _previewTimer = null;
+    // video_player.pause() can update isPlaying synchronously. Capture
+    // the prior state BEFORE asking the Android decoder to pause.
+    final wasPlaying = _playing;
+    _resumeAfterScrub = wasPlaying;
+    _pauseJob = wasPlaying ? _video!.pause() : Future<void>.value();
+    _lastPreviewStarted =
+        DateTime.now().subtract(_previewInterval);
     _scrubAt = initial;
     _pendingPreview = null;
     _hideTimer?.cancel();
@@ -328,12 +336,29 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     if (!_scrubbing) return;
     setState(() => _scrubAt = Duration(milliseconds:
         target.inMilliseconds.clamp(0, _length.inMilliseconds)));
+    // Keep the latest finger position, but do not cancel every preview
+    // timer as the finger moves. The old debounce only sought AFTER the
+    // user stopped dragging, so the video frame never updated in motion.
     _pendingPreview = _scrubAt;
-    _previewTimer?.cancel();
-    _previewTimer = Timer(const Duration(milliseconds: 180), () {
-      if (_previewJob == null && _pendingPreview != null) {
-        _previewJob = _previewCurrent(_seekGeneration);
+    _schedulePreview();
+  }
+
+  void _schedulePreview() {
+    if (!_scrubbing || _seekFailed || _pendingPreview == null ||
+        _previewTimer != null || _previewJob != null) {
+      return;
+    }
+    final since = DateTime.now().difference(_lastPreviewStarted);
+    final wait = since >= _previewInterval
+        ? Duration.zero : _previewInterval - since;
+    _previewTimer = Timer(wait, () {
+      _previewTimer = null;
+      if (!_scrubbing || _seekFailed || _pendingPreview == null ||
+          _previewJob != null) {
+        return;
       }
+      _lastPreviewStarted = DateTime.now();
+      _previewJob = _previewCurrent(_seekGeneration);
     });
   }
 
@@ -349,22 +374,28 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       if (target != null) {
         await _seekTo(target);
       }
+    } catch (e) {
+      if (mounted && generation == _seekGeneration) {
+        setState(() => _error = 'Preview seek failed: $e');
+      }
     } finally {
       _previewJob = null;
-      if (mounted && _scrubbing && _pendingPreview != null && !_seekFailed) {
-        _previewTimer?.cancel();
-        _previewTimer = Timer(const Duration(milliseconds: 180), () {
-          _previewJob ??= _previewCurrent(generation);
-        });
+      if (mounted && generation == _seekGeneration) {
+        // New finger positions collected during the native seek are
+        // previewed next, never queued as competing native seeks.
+        _schedulePreview();
       }
     }
   }
 
   Future<void> _endScrub() async {
     if (!_scrubbing) return;
+    final generation = _seekGeneration;
+    final video = _video;
     final target = _scrubAt;
     final resume = _resumeAfterScrub;
     _previewTimer?.cancel();
+    _previewTimer = null;
     _pendingPreview = null;
     setState(() {
       _scrubbing = false;
@@ -372,14 +403,34 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       _controlsVisible = true;
     });
     try {
+      // Wait for the last frame preview before the final precise position,
+      // keeping all native seek commands serialized.
       await _previewJob;
       await _pauseJob;
+      if (!mounted || generation != _seekGeneration ||
+          !identical(video, _video)) {
+        return;
+      }
       if (!_seekFailed) await _seekTo(target);
-      if (resume && !_seekFailed && _ready) await _video!.play();
     } catch (e) {
-      if (mounted) setState(() => _error = 'Scrubbing stopped: $e');
+      if (mounted && generation == _seekGeneration) {
+        setState(() => _error = 'Scrubbing stopped: $e');
+      }
+    } finally {
+      // Resume whenever the video WAS playing at the start of the drag,
+      // even if a preview/seek failed. Preserve a pre-existing pause.
+      if (resume && mounted && generation == _seekGeneration &&
+          identical(video, _video) && _ready) {
+        try {
+          await video!.play().timeout(const Duration(seconds: 4));
+        } catch (e) {
+          if (mounted) {
+            setState(() => _error = 'Unable to resume playback: $e');
+          }
+        }
+      }
+      if (mounted && generation == _seekGeneration) _scheduleHide();
     }
-    _scheduleHide();
   }
 
   void _beginSwipe(DragStartDetails details) {
