@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 import 'guided_recovery_screen.dart';
 import 'android_compatibility_player.dart';
-import 'android_player_screen.dart';
 import 'android_v2_player.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
