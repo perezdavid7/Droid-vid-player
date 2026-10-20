@@ -786,16 +786,16 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
           const Center(child: CircularProgressIndicator())
         else if (_ready && _video != null)
           _picture(_video!)
-        if (_scrubbing && _scrubOnPicture && _previewBytes != null)
-          Positioned.fill(child: IgnorePointer(child: Center(
-            child: Image.memory(_previewBytes!,
-              gaplessPlayback: true, fit: BoxFit.contain),
-          )))
         else
           Center(child: Padding(
             padding: const EdgeInsets.all(20),
             child: Text(_error ?? 'Video unavailable.',
               textAlign: TextAlign.center))),
+        if (_scrubbing && _scrubOnPicture && _previewBytes != null)
+          Positioned.fill(child: IgnorePointer(child: Center(
+            child: Image.memory(_previewBytes!,
+              gaplessPlayback: true, fit: BoxFit.contain),
+          ))),
         if (_scrubbing && _scrubOnPicture)
           _scrubOverlay(),
         if (_slowHolding)
