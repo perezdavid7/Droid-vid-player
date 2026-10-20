@@ -10,7 +10,8 @@ import 'package:video_player/video_player.dart';
 
 import 'guided_recovery_screen.dart';
 
-enum _SwipeMode { none, forward, rewind }
+enum _SwipeMode { none, preview, forward, rewind }
+enum _SwipeControl { preview, speed }
 
 /// Primary Android playback screen. ExoPlayer is provided by video_player on
 /// Android; the legacy MPV screen is optional for direct A/B comparisons.
@@ -63,17 +64,19 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   bool _seeking = false;
   int _seekGeneration = 0;
 
-  // Forward swipe is real accelerated playback, not repeated seek jumps.
-  // Reverse swipe remains frame-preview seeking until a buffered reverse
-  // decoder is available.
+  // Explicit modes prevent a horizontal drag from having two competing
+  // meanings. Preview seeks in both directions, speed uses actual forward
+  // playback rates. Native reverse decoding is not yet available.
+  _SwipeControl _swipeControl = _SwipeControl.preview;
   _SwipeMode _swipeMode = _SwipeMode.none;
   bool _swipeActive = false;
   bool _swipeWasPlaying = false;
   bool _forwardRestoring = false;
   int _forwardGeneration = 0;
   double _forwardTravel = 0;
-  double _forwardSpeed = 1.5;
-  double _desiredForwardSpeed = 1.5;
+  double _forwardSpeed = 2.0;
+  double _desiredForwardSpeed = 2.0;
+  double _lastSwipeDx = 0;
   double _appliedForwardSpeed = 1.0;
   Future<void>? _forwardRateTask;
 
@@ -450,6 +453,12 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     }
   }
 
+  void _selectSwipeControl(_SwipeControl selected) {
+    if (_swipeActive || _scrubbing || _forwardRestoring) return;
+    setState(() => _swipeControl = selected);
+    _wakeControls();
+  }
+
   void _beginSwipe(DragStartDetails details) {
     if (!_ready || _zoom > 1.02 || _slowHolding || _scrubbing ||
         _forwardRestoring || _swipeActive) {
@@ -460,15 +469,34 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     _swipeWasPlaying = _playing;
     _swipeMode = _SwipeMode.none;
     _forwardTravel = 0;
-    _forwardSpeed = 1.5;
+    _lastSwipeDx = 0;
+    _forwardSpeed = 2.0;
+    _desiredForwardSpeed = 2.0;
+    if (_swipeControl == _SwipeControl.preview) {
+      // Preview mode does not change actual playback speed. Live seek
+      // frames in EITHER direction as the finger moves.
+      _swipeMode = _SwipeMode.preview;
+      _beginScrub(_position, swipe: true);
+    }
   }
 
   void _updateSwipe(DragUpdateDetails details) {
     if (!_swipeActive || !_ready || _viewport.width <= 0) return;
     final dx = details.delta.dx;
-    // Commit to a direction only once the drag passes the initial threshold.
-    // While moving forward, use real ExoPlayer playback with adjustable speed.
-    // Moving backward uses our existing seek-based live preview.
+    _lastSwipeDx = dx;
+    if (_swipeMode == _SwipeMode.preview ||
+        _swipeMode == _SwipeMode.rewind) {
+      if (!_scrubbing) return;
+      final msPerPixel = math.max(120.0,
+          _length.inMilliseconds / math.max(100.0, _viewport.width) * 0.30);
+      _updateScrub(_scrubAt + Duration(milliseconds:
+          (dx * msPerPixel).round()));
+      return;
+    }
+
+    // Speed mode is explicit. A swipe to the right really runs the
+    // decoder faster; a swipe to the left retains seek preview, since
+    // ExoPlayer has no regular continuous reverse-playback API.
     if (_swipeMode == _SwipeMode.none) {
       _forwardTravel += dx;
       if (_forwardTravel.abs() < 6) return;
@@ -477,34 +505,27 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
         _forwardGeneration++;
         _appliedForwardSpeed = _speed;
         _hideTimer?.cancel();
-        setState(() {
-          _controlsVisible = false;
-        });
+        setState(() => _controlsVisible = false);
       } else {
         _swipeMode = _SwipeMode.rewind;
         _beginScrub(_position, swipe: true);
-        // Gesture initiation has not yet moved the video.
         _forwardTravel = 0;
+        return;
       }
     }
     if (_swipeMode == _SwipeMode.forward) {
       _forwardTravel = (_forwardTravel + dx).clamp(0.0, _viewport.width);
-      final progress = (_forwardTravel / math.max(100, _viewport.width))
-          .clamp(0.0, 1.0);
-      // Quantized rates limit native speed changes and audio glitches.
-      final rate = (1.5 + progress * 4.5);
-      final quantized = (rate * 2).round() / 2.0;
-      _desiredForwardSpeed = quantized.clamp(1.5, 6.0);
-      if ((_forwardSpeed - _desiredForwardSpeed).abs() > 0.01) {
-        setState(() => _forwardSpeed = _desiredForwardSpeed);
+      // A short one-handed drag now reaches noticeably different rates.
+      // ExoPlayer might render fewer frames at 8x, but it receives a real
+      // playback-rate command, not a skipped-timestamp seek.
+      final nextRate = _forwardTravel < 45 ? 2.0
+          : _forwardTravel < 110 ? 4.0 : 8.0;
+      _desiredForwardSpeed = nextRate;
+      if ((_forwardSpeed - nextRate).abs() > 0.01) {
+        setState(() => _forwardSpeed = nextRate);
+        unawaited(HapticFeedback.selectionClick());
       }
       _queueForwardRate();
-    } else if (_swipeMode == _SwipeMode.rewind) {
-      if (!_scrubbing) return;
-      final msPerPixel = math.max(120.0,
-          _length.inMilliseconds / math.max(100.0, _viewport.width) * 0.30);
-      _updateScrub(_scrubAt + Duration(milliseconds:
-          (dx * msPerPixel).round()));
     }
   }
 
@@ -564,7 +585,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     final mode = _swipeMode;
     _swipeActive = false;
     _swipeMode = _SwipeMode.none;
-    if (mode == _SwipeMode.rewind) {
+    if (mode == _SwipeMode.rewind || mode == _SwipeMode.preview) {
       await _endScrub();
     } else if (mode == _SwipeMode.forward) {
       _forwardRestoring = true;
@@ -905,6 +926,27 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     ]);
   }
 
+  Widget _swipeControlPicker() => Row(
+    mainAxisAlignment: MainAxisAlignment.center,
+    children: [
+      const Text('Swipe:', style: TextStyle(fontSize: 12)),
+      const SizedBox(width: 8),
+      ChoiceChip(
+        label: const Text('Preview'),
+        selected: _swipeControl == _SwipeControl.preview,
+        visualDensity: VisualDensity.compact,
+        onSelected: (_) => _selectSwipeControl(_SwipeControl.preview),
+      ),
+      const SizedBox(width: 8),
+      ChoiceChip(
+        label: const Text('Speed 2× / 4× / 8×'),
+        selected: _swipeControl == _SwipeControl.speed,
+        visualDensity: VisualDensity.compact,
+        onSelected: (_) => _selectSwipeControl(_SwipeControl.speed),
+      ),
+    ],
+  );
+
   Widget _overlayControls() => SafeArea(
     top: false,
     minimum: const EdgeInsets.fromLTRB(8, 0, 8, 20),
@@ -918,6 +960,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           if (!_scrubbing) _transport(),
           if (!_scrubbing) _displayOptions(),
+          if (!_scrubbing) _swipeControlPicker(),
           _timeline(),
           if (_seekFailed)
             const Text('Seeking stalled. Reopen the video to reset playback.',
@@ -1012,8 +1055,8 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
                   padding: const EdgeInsets.all(12),
                   child: Text(
                     _swipeMode == _SwipeMode.forward
-                        ? 'Fast forward ${_forwardSpeed.toStringAsFixed(1)}× ▶▶   ${_clock(_position)}'
-                        : '◀ Rewind preview   ${_clock(_scrubAt)}',
+                        ? 'Speed ${_forwardSpeed.toStringAsFixed(0)}× ▶▶  ${_clock(_position)}'
+                        : '${_lastSwipeDx >= 0 ? '▶' : '◀'} Preview  ${_clock(_scrubAt)}',
                     style: const TextStyle(fontSize: 20)),
                 ),
               ),
