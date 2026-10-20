@@ -62,7 +62,6 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   bool _seekFailed = false;
   bool _seeking = false;
   int _seekGeneration = 0;
-  double _swipeDirection = 0;
 
   // Forward swipe is real accelerated playback, not repeated seek jumps.
   // Reverse swipe remains frame-preview seeking until a buffered reverse
@@ -347,7 +346,6 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       _scrubbing = true;
       _swipeScrub = swipe;
       _controlsVisible = !swipe;
-      _swipeDirection = 0;
     });
   }
 
@@ -463,7 +461,6 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     _swipeMode = _SwipeMode.none;
     _forwardTravel = 0;
     _forwardSpeed = 1.5;
-    _swipeDirection = 0;
   }
 
   void _updateSwipe(DragUpdateDetails details) {
@@ -482,7 +479,6 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
         _hideTimer?.cancel();
         setState(() {
           _controlsVisible = false;
-          _swipeDirection = 1;
         });
       } else {
         _swipeMode = _SwipeMode.rewind;
@@ -507,7 +503,6 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       if (!_scrubbing) return;
       final msPerPixel = math.max(120.0,
           _length.inMilliseconds / math.max(100.0, _viewport.width) * 0.30);
-      _swipeDirection = dx.sign;
       _updateScrub(_scrubAt + Duration(milliseconds:
           (dx * msPerPixel).round()));
     }
