@@ -80,6 +80,10 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   double _lastSwipeDx = 0;
   double _appliedForwardSpeed = 1.0;
   Future<void>? _forwardRateTask;
+  Timer? _speedMeter;
+  DateTime? _speedWall;
+  Duration? _speedMedia;
+  double? _observedSpeed;
 
   ReverseFrameDecoder? _reverseDecoder;
   ReverseFrameBatch? _reverseBatch;
@@ -91,6 +95,8 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
   bool _reverseWasPlaying = false;
   int _reverseGeneration = 0;
   int _reverseIndex = -1;
+  Future<ReverseFrameBatch?>? _reversePrefetch;
+  Duration? _reversePrefetchBefore;
   bool _reverseStopping = false;
 
   bool _slowHolding = false;
@@ -192,6 +198,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     _swipeMode = _SwipeMode.none;
     _swipeActive = false;
     _resetZoom();
+    _stopSpeedMeter();
     _hideTimer?.cancel();
     final old = _controller;
     if (mounted) {
@@ -486,6 +493,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     _lastSwipeDx = 0;
     _forwardSpeed = 2.0;
     _desiredForwardSpeed = 2.0;
+    _observedSpeed = null;
     if (_swipeControl == _SwipeControl.continuous) return;
     if (_swipeControl == _SwipeControl.preview) {
       // Preview mode does not change actual playback speed. Live seek
@@ -510,6 +518,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
         _swipeMode = _SwipeMode.forward;
         _forwardGeneration++;
         _appliedForwardSpeed = _speed;
+        _startSpeedMeter();
         setState(() => _controlsVisible = false);
       }
     }
@@ -560,6 +569,37 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       }
       _queueForwardRate();
     }
+  }
+
+  void _startSpeedMeter() {
+    _speedMeter?.cancel();
+    _speedWall = DateTime.now();
+    _speedMedia = _position;
+    _observedSpeed = null;
+    _speedMeter = Timer.periodic(const Duration(milliseconds: 850), (_) {
+      if (!mounted || !_swipeActive || _swipeMode != _SwipeMode.forward) {
+        _stopSpeedMeter();
+        return;
+      }
+      final now = DateTime.now();
+      final previousTime = _speedWall;
+      final previousMedia = _speedMedia;
+      final position = _position;
+      _speedWall = now;
+      _speedMedia = position;
+      if (previousTime == null || previousMedia == null) return;
+      final elapsed = now.difference(previousTime).inMilliseconds;
+      if (elapsed < 200) return;
+      final moved = position.inMilliseconds - previousMedia.inMilliseconds;
+      setState(() => _observedSpeed = math.max(0, moved / elapsed));
+    });
+  }
+
+  void _stopSpeedMeter() {
+    _speedMeter?.cancel();
+    _speedMeter = null;
+    _speedWall = null;
+    _speedMedia = null;
   }
 
   void _queueForwardRate() {
@@ -623,6 +663,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     } else if (mode == _SwipeMode.rewind || mode == _SwipeMode.preview) {
       await _endScrub();
     } else if (mode == _SwipeMode.forward) {
+      _stopSpeedMeter();
       _forwardRestoring = true;
       final generation = _forwardGeneration;
       final video = _video;
@@ -697,7 +738,10 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     }
     setState(() => _reverseLoading = true);
     final batch = await decoder.decode(
-      sourcePath: source, before: _reversePosition);
+      sourcePath: source, before: _reversePosition,
+      windowMillis: _reverseBatch == null
+          ? ReverseFrameDecoder.initialChunkMillis
+          : ReverseFrameDecoder.chunkMillis);
     if (!mounted || !_reverseActive ||
         generation != _reverseGeneration) {
       return;
@@ -711,6 +755,8 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     }
     _reverseBatch = batch;
     _reverseIndex = batch.images.length - 1;
+    _reversePrefetch = null;
+    _reversePrefetchBefore = null;
     _showReverseFrame(generation);
     _reverseTimer?.cancel();
     _reverseTimer = Timer.periodic(
@@ -727,8 +773,15 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     if (_reverseIndex < 0) {
       _reverseTimer?.cancel();
       _reversePosition = batch.start;
-      unawaited(_loadReverseBatch(generation));
+      unawaited(_advanceReverseBatch(generation));
       return;
+    }
+    if (_reverseIndex <= 7 && _reversePrefetch == null &&
+        batch.start > Duration.zero && _reverseDecoder != null &&
+        _path != null) {
+      _reversePrefetchBefore = batch.start;
+      _reversePrefetch = _reverseDecoder!.decode(
+        sourcePath: _path!, before: batch.start);
     }
     final index = _reverseIndex--;
     setState(() {
@@ -736,6 +789,33 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
       _reversePosition = batch.positionFor(index);
       _reverseLoading = false;
     });
+  }
+
+  Future<void> _advanceReverseBatch(int generation) async {
+    final pending = _reversePrefetch;
+    final before = _reversePrefetchBefore;
+    if (pending == null || before == null) {
+      await _loadReverseBatch(generation);
+      return;
+    }
+    if (mounted && _reverseActive && generation == _reverseGeneration) {
+      setState(() => _reverseLoading = true);
+    }
+    final batch = await pending;
+    if (!mounted || !_reverseActive || generation != _reverseGeneration) {
+      return;
+    }
+    _reversePrefetch = null;
+    _reversePrefetchBefore = null;
+    if (batch == null || batch.images.isEmpty) {
+      await _loadReverseBatch(generation);
+      return;
+    }
+    _reverseBatch = batch;
+    _reverseIndex = batch.images.length - 1;
+    _showReverseFrame(generation);
+    _reverseTimer = Timer.periodic(
+      const Duration(milliseconds: 83), (_) => _showReverseFrame(generation));
   }
 
   void _stopReverse() {
@@ -747,6 +827,8 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     _reverseBatch = null;
     _reverseImage = null;
     _reverseIndex = -1;
+    _reversePrefetch = null;
+    _reversePrefetchBefore = null;
     final decoder = _reverseDecoder;
     _reverseDecoder = null;
     if (decoder != null) unawaited(decoder.dispose());
@@ -885,6 +967,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
     _swipeActive = false;
     _swipeMode = _SwipeMode.none;
     _hideTimer?.cancel();
+    _stopSpeedMeter();
     _transform.removeListener(_onTransformChanged);
     _transform.dispose();
     final video = _controller;
@@ -1222,7 +1305,7 @@ class _AndroidMainPlayerState extends State<AndroidMainPlayer> {
                   padding: const EdgeInsets.all(12),
                   child: Text(
                     _swipeMode == _SwipeMode.forward
-                        ? 'Speed ${_forwardSpeed.toStringAsFixed(0)}× ▶▶  ${_clock(_position)}'
+                        ? 'Requested ${_forwardSpeed.toStringAsFixed(0)}× · actual ${_observedSpeed?.toStringAsFixed(1) ?? 'measuring'}×  ${_clock(_position)}'
                         : '${_lastSwipeDx >= 0 ? '▶' : '◀'} Preview  ${_clock(_scrubAt)}',
                     style: const TextStyle(fontSize: 20)),
                 ),
