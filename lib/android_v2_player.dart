@@ -791,7 +791,8 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
             padding: const EdgeInsets.all(20),
             child: Text(_error ?? 'Video unavailable.',
               textAlign: TextAlign.center))),
-        if (_scrubbing && _scrubOnPicture && _previewBytes != null)
+        if ((_scrubbing || _finishingScrub) && _scrubOnPicture &&
+            _previewBytes != null)
           Positioned.fill(child: IgnorePointer(child: Center(
             child: Image.memory(_previewBytes!,
               gaplessPlayback: true, fit: BoxFit.contain),
