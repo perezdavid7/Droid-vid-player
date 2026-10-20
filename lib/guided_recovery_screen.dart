@@ -38,6 +38,8 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
   bool _canAttempt = false;
   bool _gallerySaved = false;
   bool _seekVerified = false;
+  bool _preferReliablePlayback = false;
+  bool _lastWasLossless = false;
   String? _result;
   String? _error;
   String _status = 'Inspecting file header…';
@@ -86,6 +88,11 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
       setState(() {
         _identified = identification;
         _canAttempt = recognized && !missingMp4Index;
+        // Timestamp-corrupt MPEG Program Streams can survive stream-copy
+        // but still hang on seeking. Prefer rebuilding their decode timeline,
+        // while allowing a lossless-first override.
+        _preferReliablePlayback =
+            identification.format.startsWith('MPEG program stream');
         _status = 'Initial analysis complete.';
         if (identification.isNonVideo) {
           _advice = 'The header belongs to a non-video file. '
@@ -95,8 +102,13 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
               'Ordinary remuxing cannot reconstruct it. '
               'Advanced reconstruction may require a matching reference file.';
         } else if (recognized) {
-          _advice = 'Recognized media. Start with a lossless remux; '
-              'if it fails verification, try Deep Recovery automatically.';
+          _advice = identification.format.startsWith('MPEG program stream')
+              ? 'MPEG Program Stream detected. These recordings may carry '
+                'unreliable timestamps even after lossless remuxing. '
+                'Reliable playback is recommended for files that freeze '
+                'during seeking, but requires re-encoding.'
+              : 'Recognized media. Try lossless remuxing first; if it fails '
+                'verification, rebuild decoded video automatically.';
         } else {
           _advice = 'Unknown format. Inspect the file for recoverable '
               'media signatures before selecting a recovery method.';
@@ -345,20 +357,28 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
         '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn',
       ];
       // Matroska supports more stream-copy combinations than MP4 (such as
-      // MPEG-2 + MP2 audio) and does not introduce compression artifacts.
-      for (final quick in (deepOnly ? <bool>[false] : <bool>[true, false])) {
+      // MPEG-2 + MP2 audio). On timestamp-damaged sources, a lossless
+      // container remux can preserve the same stalls. Reliable mode uses
+      // decode/re-encode immediately rather than pretending that it
+      // regenerates missing or broken keyframes.
+      final attempts = (deepOnly || _preferReliablePlayback)
+          ? <bool>[false] : <bool>[true, false];
+      for (final quick in attempts) {
         if (_cancelled) break;
         final ext = quick ? 'mkv' : 'mp4';
         workFile = p.join(dir.path,
             '$stem${quick ? '.copy.working.mkv' : '.deep.working.mp4'}');
         final outputFile = p.join(dir.path, '$stem.$ext');
         setState(() => _status = quick
-            ? 'Attempt 1/2: Lossless stream repair…'
-            : 'Attempt 2/2: Decode and rebuild video…');
+            ? 'Preserving original compressed quality (lossless remux)…'
+            : 'Rebuilding playback timeline at high quality…');
         final args = <String>[
           ...inputArgs,
           if (quick) ...['-c', 'copy'] else ...[
-            '-c:v', 'mpeg4', '-q:v', '2', '-pix_fmt', 'yuv420p',
+            // MPEG-4 Part 2 is supported by the bundled minimal FFmpeg.
+            // q:v=1 is higher quality (and larger) than our previous q:v=2.
+            '-c:v', 'mpeg4', '-q:v', '1', '-pix_fmt', 'yuv420p',
+            '-vf', 'setpts=PTS-STARTPTS',
             '-c:a', 'aac', '-b:a', '192k',
             '-af', 'aresample=async=1000:first_pts=0',
             '-fps_mode', 'vfr',
@@ -394,18 +414,17 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
           if (!mounted) return;
           setState(() {
             _result = outputFile;
+            _lastWasLossless = quick;
             _seekVerified = seekCheck == _SeekCheck.passed;
             _status = seekCheck == _SeekCheck.passed
                 ? 'Recovered copy passed initial decoding and two seek checks.'
                 : 'Playable copy created; seeking remains unverified.';
             _advice = seekCheck == _SeekCheck.passed
-                ? 'Initial decoding and sample seeks passed. Full-length '
-                  'playback, accurate timeline position, and audio sync '
-                  'still need to be tested. '
-                  'If this copy freezes, use the Deep Recovery option below.'
-                : 'This copy can decode initial frames, but its seeking '
-                  'could not be confirmed. Do not assume that forward '
-                  'and backward jumps are safe.';
+                ? 'Sample positions decoded, but not every part of the '
+                  'timeline was checked. Test backward/forward seeking on '
+                  'your phone; the original remains untouched.'
+                : 'This output decodes initial frames, but seeking was not '
+                  'confirmed. Some damaged sections may still stall.';
           });
           await _saveGallery(outputFile);
           return;
@@ -486,9 +505,9 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
                   overflow: TextOverflow.ellipsis),
               const SizedBox(height: 12),
               const Text(
-                'First identify the file, then try a lossless repair. '
-                'If the recovered output cannot decode, optionally '
-                'rebuild it at high quality. No original files are changed.',
+                'First identify the file, then choose whether to preserve '
+                'original compression or prioritize reliable navigation. '
+                'Either approach creates a separate copy.',
               ),
               const SizedBox(height: 18),
               Text(_status, style: const TextStyle(fontSize: 16,
@@ -496,6 +515,22 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
               if (_identified != null) ...[
                 const SizedBox(height: 8),
                 Text('Detected format: ${_identified!.format}'),
+              ],
+              if (_canAttempt && !_running && _result == null) ...[
+                const SizedBox(height: 10),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Prioritize reliable seeking'),
+                  subtitle: const Text(
+                    'On: rebuild decoded video at higher quality '
+                    '(may take longer, use more storage). '
+                    'Off: preserve compressed picture quality first '
+                    '(seeking problems may remain).',
+                  ),
+                  value: _preferReliablePlayback,
+                  onChanged: (value) =>
+                      setState(() => _preferReliablePlayback = value),
+                ),
               ],
               const SizedBox(height: 10),
               Text(_advice, style: const TextStyle(
@@ -548,11 +583,12 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
                 ),
                 const SizedBox(height: 8),
                 if (!_running)
-                  OutlinedButton.icon(
-                    onPressed: () => _recover(deepOnly: true),
-                    icon: const Icon(Icons.sync),
-                    label: const Text('Try Deep Recovery for better seeking'),
-                  ),
+                  if (_lastWasLossless)
+                    OutlinedButton.icon(
+                      onPressed: () => _recover(deepOnly: true),
+                      icon: const Icon(Icons.sync),
+                      label: const Text('Rebuild for more reliable seeking'),
+                    ),
               ],
               if (!_running)
                 OutlinedButton.icon(
