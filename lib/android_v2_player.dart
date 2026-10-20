@@ -115,7 +115,9 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
 
   void _requestHardwareFrame() {
     if (_previewTexture == null || !_scrubbing ||
-        !_scrubOnPicture) return;
+        !_scrubOnPicture) {
+      return;
+    }
     unawaited(_hardware.invokeMethod<void>('seek',
       <String, Object>{'timeMs': _scrubTarget.inMilliseconds}));
   }
