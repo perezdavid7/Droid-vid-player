@@ -66,6 +66,18 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   double _totalDrag = 0;
   double _gestureWidth = 400;
 
+  // One unified scale recognizer arbitrates all picture gestures. Using
+  // onHorizontalDrag beside onScale would let a one-finger drag win the
+  // gesture arena before the second pinch finger arrived.
+  double _pictureZoom = 1;
+  Offset _picturePan = Offset.zero;
+  double _lastGestureScale = 1;
+  bool _usedTwoFingers = false;
+  double _gestureDx = 0;
+  double _gestureDy = 0;
+  bool _gestureScrub = false;
+  static const double _maxPictureZoom = 6;
+
   bool _slowHolding = false;
   bool _slowWasPlaying = false;
   int _slowGeneration = 0;
@@ -269,6 +281,10 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       _slowHolding = false;
       _controlsVisible = true;
       _rotation = 0;
+      _pictureZoom = 1;
+      _picturePan = Offset.zero;
+      _usedTwoFingers = false;
+      _gestureScrub = false;
     });
     try {
       if (old != null) {
@@ -527,18 +543,91 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     }
   }
 
-  void _pictureDragStart(DragStartDetails details, double width) {
-    _beginScrub(picture: true, width: width);
+  void _scaleStart(ScaleStartDetails details) {
+    _lastGestureScale = 1;
+    _usedTwoFingers = details.pointerCount > 1;
+    _gestureScrub = false;
+    _gestureDx = 0;
+    _gestureDy = 0;
   }
 
-  void _pictureDragUpdate(DragUpdateDetails details) {
-    if (!_scrubbing || !_scrubOnPicture) {
+  void _scaleUpdate(ScaleUpdateDetails details, Size bounds) {
+    // Two fingers always take precedence over seeking. Do not start any
+    // more native preview/seek requests once a pinch has been detected.
+    if (details.pointerCount > 1) {
+      if (!_usedTwoFingers) {
+        _usedTwoFingers = true;
+        if (_gestureScrub) {
+          _gestureScrub = false;
+          unawaited(_finishScrub());
+        }
+      }
+    }
+
+    if (_usedTwoFingers || _pictureZoom > 1.001) {
+      final oldZoom = _pictureZoom;
+      final factor = details.scale / _lastGestureScale;
+      final newZoom = (oldZoom * factor).clamp(1.0, _maxPictureZoom);
+      final local = details.localFocalPoint;
+      final delta = details.focalPointDelta;
+      final scaleRatio = newZoom / oldZoom;
+      final nextPan = Offset(
+        local.dx - (local.dx - _picturePan.dx) * scaleRatio + delta.dx,
+        local.dy - (local.dy - _picturePan.dy) * scaleRatio + delta.dy,
+      );
+      final maxX = bounds.width * (newZoom - 1);
+      final maxY = bounds.height * (newZoom - 1);
+      setState(() {
+        _pictureZoom = newZoom;
+        _picturePan = newZoom <= 1.001
+            ? Offset.zero
+            : Offset(
+                nextPan.dx.clamp(-maxX, 0.0),
+                nextPan.dy.clamp(-maxY, 0.0),
+              );
+      });
+      _lastGestureScale = details.scale;
       return;
     }
-    _totalDrag += details.delta.dx;
+
+    _lastGestureScale = details.scale;
+    if (!_ready || _slowHolding || _finishingScrub) {
+      return;
+    }
+    _gestureDx += details.focalPointDelta.dx;
+    _gestureDy += details.focalPointDelta.dy;
+    // Avoid seeking during vertical drags. The first horizontal movement
+    // establishes the swipe without changing its existing sensitivity.
+    if (!_gestureScrub) {
+      if (_gestureDx.abs() < 8 || _gestureDx.abs() < _gestureDy.abs()) {
+        return;
+      }
+      _beginScrub(picture: true, width: bounds.width);
+      _gestureScrub = _scrubbing && _scrubOnPicture;
+      if (!_gestureScrub) return;
+    }
+
+    _totalDrag += details.focalPointDelta.dx;
     final newMs = _scrubStart.inMilliseconds +
         (_totalDrag * _msPerPixel()).round();
     _moveScrub(Duration(milliseconds: newMs));
+  }
+
+  void _scaleEnd(ScaleEndDetails details) {
+    if (_gestureScrub) {
+      unawaited(_finishScrub());
+    }
+    _gestureScrub = false;
+    _usedTwoFingers = false;
+    _lastGestureScale = 1;
+  }
+
+  void _resetPictureZoom() {
+    if (_pictureZoom <= 1.001 && _picturePan == Offset.zero) return;
+    setState(() {
+      _pictureZoom = 1;
+      _picturePan = Offset.zero;
+    });
   }
 
   Future<void> _finishScrub() async {
@@ -724,24 +813,36 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
             _showControls();
           }
         },
-        onHorizontalDragStart: (details) =>
-            _pictureDragStart(details, constraints.maxWidth),
-        onHorizontalDragUpdate: _pictureDragUpdate,
-        onHorizontalDragEnd: (_) => unawaited(_finishScrub()),
-        onHorizontalDragCancel: () => unawaited(_finishScrub()),
+        // One recognizer manages both pinch and swipes so one finger
+        // cannot steal the gesture from a two-finger zoom.
+        onScaleStart: _scaleStart,
+        onScaleUpdate: (details) => _scaleUpdate(
+          details, constraints.biggest),
+        onScaleEnd: _scaleEnd,
+        onDoubleTap: _resetPictureZoom,
         onLongPressStart: _startSlow,
         onLongPressEnd: (_) => unawaited(_stopSlow()),
         onLongPressCancel: () => unawaited(_stopSlow()),
         child: SizedBox.expand(
           child: ClipRect(
-            child: FittedBox(
-              fit: _fill ? BoxFit.cover : BoxFit.contain,
-              child: RotatedBox(
-                quarterTurns: _rotation,
-                child: SizedBox(
-                  width: width,
-                  height: height,
-                  child: VideoPlayer(player),
+            child: Transform(
+              alignment: Alignment.topLeft,
+              transform: Matrix4.identity()
+                ..setEntry(0, 0, _pictureZoom)
+                ..setEntry(1, 1, _pictureZoom)
+                ..setEntry(0, 3, _picturePan.dx)
+                ..setEntry(1, 3, _picturePan.dy),
+              child: SizedBox.expand(
+                child: FittedBox(
+                  fit: _fill ? BoxFit.cover : BoxFit.contain,
+                  child: RotatedBox(
+                    quarterTurns: _rotation,
+                    child: SizedBox(
+                      width: width,
+                      height: height,
+                      child: VideoPlayer(player),
+                    ),
+                  ),
                 ),
               ),
             ),
