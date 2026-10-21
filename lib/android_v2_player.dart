@@ -48,6 +48,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   bool _previewOpening = false;
   bool _previewFrameReady = false;
   int _previewGeneration = 0;
+  String? _previewSource;
 
   bool _scrubbing = false;
   bool _finishingScrub = false;
@@ -87,27 +88,41 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     }
   }
 
-  Future<void> _openHardwarePreview(int generation) async {
-    final source = _source;
-    if (source == null || _previewOpening || !_previewAvailable) return;
+  // Open once per video instead of recreating a 4K HEVC decoder
+  // every time the finger touches the picture. Initialization runs
+  // asynchronously; no frames are decoded while playback is idle.
+  Future<void> _openHardwarePreview(int generation, String source) async {
+    if (_previewOpening || !_previewAvailable || !mounted) {
+      return;
+    }
     _previewOpening = true;
     try {
       final response = await _hardware.invokeMapMethod<String, dynamic>(
         'open', <String, Object>{'path': source});
       if (!mounted || generation != _previewGeneration ||
-          !_scrubbing || !_scrubOnPicture) {
-        unawaited(_hardware.invokeMethod<void>('close'));
+          _source != source) {
+        // A newer open/close has superseded this response.
         return;
       }
       if (response != null) {
         setState(() {
           _previewTexture = (response['textureId'] as num).toInt();
           _previewSession = (response['session'] as num).toInt();
+          _previewSource = source;
         });
-        _requestHardwareFrame();
+        if (_scrubbing && _scrubOnPicture) {
+          _requestHardwareFrame();
+        }
       }
     } catch (_) {
-      _previewAvailable = false;
+      if (mounted && generation == _previewGeneration) {
+        _previewAvailable = false;
+        // Fallback to ExoPlayer without blocking ordinary navigation.
+        if (_scrubbing && _scrubOnPicture) {
+          _pendingSeek = _scrubTarget;
+          _startSeekPump();
+        }
+      }
     } finally {
       _previewOpening = false;
     }
@@ -126,6 +141,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     _previewGeneration++;
     _previewTexture = null;
     _previewSession = null;
+    _previewSource = null;
     _previewFrameReady = false;
     unawaited(_hardware.invokeMethod<void>('close').catchError((Object _) {}));
   }
@@ -233,11 +249,8 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     ++_slowGeneration;
     _hideTimer?.cancel();
     final old = _video;
-    _previewGeneration++;
+    _closeHardwarePreview();
     _previewAvailable = true;
-    _previewTexture = null;
-    _previewSession = null;
-    _previewFrameReady = false;
     setState(() {
       _video = null;
       _loading = true;
@@ -272,6 +285,12 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       setState(() => _loading = false);
       await player.play();
       _autoHide();
+      // Prewarm the native codec once while the video is already
+      // available for normal playback. No decode runs until the first
+      // finger move; prewarm happens without delaying ExoPlayer.
+      if (mounted && generation == _fileGeneration) {
+        unawaited(_openHardwarePreview(_previewGeneration, source));
+      }
     } catch (e) {
       if (mounted && generation == _fileGeneration) {
         setState(() {
@@ -344,8 +363,12 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     _pauseTask = previouslyPlaying ? _video!.pause() : Future<void>.value();
     _pendingSeek = null;
     _hideTimer?.cancel();
-    if (picture && _previewAvailable) {
-      unawaited(_openHardwarePreview(++_previewGeneration));
+    if (picture) {
+      _previewFrameReady = false; // Never show the previous swipe's frame.
+      if (_previewAvailable && _previewTexture == null &&
+          !_previewOpening && _source != null) {
+        unawaited(_openHardwarePreview(_previewGeneration, _source!));
+      }
     }
     setState(() {
       _scrubbing = true;
@@ -366,8 +389,12 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       return; // Stationary finger: keep displaying this exact frame.
     }
     setState(() => _scrubTarget = next);
-    if (_scrubOnPicture && _previewAvailable) {
+    if (_scrubOnPicture && _previewAvailable &&
+        _previewTexture != null && _previewSource == _source) {
       _requestHardwareFrame();
+    } else if (_previewOpening && _scrubOnPicture &&
+        _previewAvailable) {
+      // Latest target is retained until the prewarmed decoder is ready.
     } else {
       _pendingSeek = next;
       _startSeekPump();
@@ -470,7 +497,9 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
           _finishingScrub = false;
           _scrubOnPicture = false;
           _controlsVisible = !wasPictureGesture;
-          if (wasPictureGesture) _closeHardwarePreview();
+          // Preserve the initialized native codec for the next swipe.
+          // It is released on file change or when the player closes.
+          _previewFrameReady = false;
         });
         _autoHide();
       }
@@ -630,22 +659,23 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   );
 
   Widget _scrubOverlay() => IgnorePointer(
-    child: Align(
-      alignment: const Alignment(0, -0.15),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.8),
-          borderRadius: BorderRadius.circular(16),
-        ),
+    child: SafeArea(
+      bottom: false,
+      child: Align(
+        alignment: Alignment.topCenter,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+          padding: const EdgeInsets.only(top: 14, left: 12, right: 12),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(_clock(_scrubTarget), style: const TextStyle(
-              fontSize: 32, fontWeight: FontWeight.w600)),
-            const SizedBox(height: 2),
-            Text(_relativeTime(_scrubTarget - _scrubStart),
+            Text(_clock(_scrubTarget), textAlign: TextAlign.center,
               style: const TextStyle(
-                fontSize: 18, color: Colors.white70)),
+                fontSize: 23, fontWeight: FontWeight.w600,
+                color: Colors.white,
+                shadows: [Shadow(blurRadius: 5, color: Colors.black)])),
+            Text(_relativeTime(_scrubTarget - _scrubStart),
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 14, color: Colors.white70,
+                shadows: [Shadow(blurRadius: 5, color: Colors.black)])),
           ]),
         ),
       ),
