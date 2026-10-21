@@ -61,6 +61,8 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   Future<void>? _seekTask;
   Future<void>? _pauseTask;
   int _scrubGeneration = 0;
+  int _navigationGeneration = 0;
+  bool _navigationRecoveryActive = false;
   double _totalDrag = 0;
   double _gestureWidth = 400;
 
@@ -156,6 +158,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   void dispose() {
     _fileGeneration++;
     _scrubGeneration++;
+    _navigationGeneration++;
     _slowGeneration++;
     _hideTimer?.cancel();
     _hardware.setMethodCallHandler(null);
@@ -246,6 +249,8 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     }
     final generation = ++_fileGeneration;
     ++_scrubGeneration;
+    ++_navigationGeneration;
+    _navigationRecoveryActive = false;
     ++_slowGeneration;
     _hideTimer?.cancel();
     final old = _video;
@@ -326,18 +331,100 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   }
 
   Future<void> _jump(int seconds) async {
-    if (!_ready || _scrubbing || _finishingScrub) {
+    if (!_ready || _scrubbing || _finishingScrub ||
+        _navigationRecoveryActive) {
       return;
     }
+    final player = _video!;
+    final wasPlaying = player.value.isPlaying;
+    final fileGeneration = _fileGeneration;
+    final navigation = ++_navigationGeneration;
     final ms = (_position.inMilliseconds + seconds * 1000)
         .clamp(0, _duration.inMilliseconds);
     try {
-      await _video!.seekTo(Duration(milliseconds: ms));
-      _showControls();
-    } catch (e) {
-      if (mounted) {
-        setState(() => _error = 'Seek failed: $e');
+      await player.seekTo(Duration(milliseconds: ms))
+          .timeout(const Duration(seconds: 5));
+      if (!mounted || fileGeneration != _fileGeneration ||
+          navigation != _navigationGeneration ||
+          !identical(player, _video)) {
+        return;
       }
+      // Certain HEVC streams acknowledge a jump while remaining paused or
+      // buffering. Preserve the play/pause state from BEFORE the jump.
+      if (wasPlaying && !player.value.isPlaying) {
+        await player.play();
+      }
+      _showControls();
+      if (wasPlaying) {
+        unawaited(_verifyNavigationAdvance(
+          player, navigation, fileGeneration));
+      }
+    } catch (e) {
+      if (mounted && navigation == _navigationGeneration) {
+        setState(() => _error = 'Navigation failed: $e');
+      }
+    }
+  }
+
+  // A decoded frame can remain stuck even after ExoPlayer acknowledges
+  // seekTo(). Watch for actual timeline advancement, and only once try a
+  // short re-anchor seek. Never interfere with a new user action, a paused
+  // video, slow motion, or the beginning/end of a scrub gesture.
+  Future<void> _verifyNavigationAdvance(VideoPlayerController player,
+      int navigation, int fileGeneration) async {
+    if (!mounted || !identical(player, _video) || !_ready ||
+        !player.value.isPlaying || _slowHolding || _scrubbing ||
+        _finishingScrub) {
+      return;
+    }
+    final initialMs = player.value.position.inMilliseconds;
+    if (initialMs >= _duration.inMilliseconds - 2000) {
+      return;
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 1800));
+    if (!mounted || navigation != _navigationGeneration ||
+        fileGeneration != _fileGeneration ||
+        !identical(player, _video) || !player.value.isPlaying ||
+        _slowHolding || _scrubbing || _finishingScrub ||
+        _navigationRecoveryActive) {
+      return;
+    }
+    final movedMs = player.value.position.inMilliseconds - initialMs;
+    if (movedMs >= 350) {
+      return;
+    }
+    // During genuine buffering give the hardware decoder another moment
+    // before attempting a recovery, rather than piling on seeks.
+    if (player.value.isBuffering) {
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      if (!mounted || navigation != _navigationGeneration ||
+          fileGeneration != _fileGeneration ||
+          !identical(player, _video) || !player.value.isPlaying ||
+          _slowHolding || _scrubbing || _finishingScrub ||
+          _navigationRecoveryActive ||
+          player.value.position.inMilliseconds - initialMs >= 350) {
+        return;
+      }
+    }
+    _navigationRecoveryActive = true;
+    try {
+      final currentMs = player.value.position.inMilliseconds;
+      final retryMs = (currentMs + 180).clamp(0, _duration.inMilliseconds);
+      if (retryMs != currentMs) {
+        await player.seekTo(Duration(milliseconds: retryMs))
+            .timeout(const Duration(seconds: 4));
+      }
+      if (mounted && navigation == _navigationGeneration &&
+          fileGeneration == _fileGeneration &&
+          identical(player, _video) && !player.value.isPlaying) {
+        await player.play();
+      }
+    } catch (e) {
+      if (mounted && navigation == _navigationGeneration) {
+        setState(() => _error = 'Playback recovery failed: $e');
+      }
+    } finally {
+      _navigationRecoveryActive = false;
     }
   }
 
@@ -354,6 +441,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       return;
     }
     final previouslyPlaying = _playing;
+    ++_navigationGeneration;
     ++_scrubGeneration;
     _gestureWidth = width;
     _totalDrag = 0;
@@ -479,6 +567,11 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       }
       if (resume) {
         await player!.play();
+        if (mounted && generation == _scrubGeneration &&
+            identical(player, _video)) {
+          unawaited(_verifyNavigationAdvance(
+            player, ++_navigationGeneration, _fileGeneration));
+        }
       }
     } catch (e) {
       if (mounted && generation == _scrubGeneration) {
@@ -523,7 +616,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   Future<void> _applySlow(int generation) async {
     final player = _video;
     try {
-      await player!.setPlaybackSpeed(0.5);
+      await player!.setPlaybackSpeed(0.2);
       if (generation == _slowGeneration && !player.value.isPlaying) {
         await player.play();
       }
@@ -834,7 +927,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
           _scrubOverlay(),
         if (_slowHolding)
           const Positioned(top: 80, left: 0, right: 0,
-            child: Center(child: Text('Slow motion 0.5×'))),
+            child: Center(child: Text('Slow motion 0.2×'))),
         if (_controlsVisible && !_scrubbing)
           _toolbar(),
         if (_controlsVisible && _ready && !_scrubOnPicture)
