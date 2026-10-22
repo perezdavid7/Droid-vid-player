@@ -96,8 +96,8 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     try {
       final scan = await scanRawVideo(path);
       if (mounted) {
-        setState(() => message = scan.diagnostic +
-            '\nMarkers are not evidence of decodable frames. '
+        setState(() => message = '${scan.diagnostic}\n'
+            'Markers are not evidence of decodable frames. '
             'An unfinished MP4 may lack the movie index.');
       }
     } catch (e) {
