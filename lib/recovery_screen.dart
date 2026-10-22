@@ -192,14 +192,28 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         '-map', '0:v:0', '-map', '0:a:0?',
         '-sn', '-dn',
       ];
+      // MPEG program streams can contain resolution changes, damaged GOPs,
+      // and wildly discontinuous PTS. Rebuild a stable 30 fps timeline from
+      // successfully decoded frames and maintain one output frame size.
+      // This path is deliberately limited to older MPEG inputs so other
+      // videos retain their original resolutions and frame rates.
+      final legacyMpeg = <String>{'.mpg', '.mpeg', '.m2v', '.vob'}
+          .contains(p.extension(widget.sourcePath).toLowerCase());
       final encodingArgs = _mode == RecoveryMode.quickRepair
           ? <String>['-c', 'copy']
           : <String>[
+              if (legacyMpeg) ...[
+                '-vf',
+                'scale=720:480:force_original_aspect_ratio=decrease,'
+                'pad=720:480:(ow-iw)/2:(oh-ih)/2,setsar=1,'
+                'setpts=N/(30*TB)',
+                '-r', '30',
+                '-fps_mode', 'cfr',
+              ] else ...['-fps_mode', 'vfr'],
               '-c:v', 'mpeg4', '-q:v', '2',
-            '-pix_fmt', 'yuv420p',
+              '-pix_fmt', 'yuv420p',
               '-c:a', 'aac', '-b:a', '192k',
               '-af', 'aresample=async=1000:first_pts=0',
-              '-fps_mode', 'vfr',
             ];
       final args = <String>[
         ...sharedArgs,
