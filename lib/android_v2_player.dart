@@ -756,27 +756,62 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     if (source == null) {
       return;
     }
+
+    // FFmpeg can need substantial native decoder, encoder and filter
+    // memory for long recoveries. Pausing ExoPlayer is NOT sufficient:
+    // it retains its codec, while V2 also keeps an independent MediaCodec
+    // scrub-preview instance allocated between gestures.
+    ++_fileGeneration;
+    ++_scrubGeneration;
+    ++_navigationGeneration;
+    ++_slowGeneration;
+    _hideTimer?.cancel();
+    _closeHardwarePreview();
+    final player = _video;
+    player?.removeListener(_onVideoChanged);
+    setState(() {
+      _video = null;
+      _scrubbing = false;
+      _finishingScrub = false;
+      _slowHolding = false;
+      _loading = false;
+      _controlsVisible = true;
+    });
     try {
-      await _video?.pause();
-      if (!mounted) {
-        return;
-      }
+      await player?.dispose().timeout(const Duration(seconds: 8));
+    } catch (e) {
+      debugPrint('Playback cleanup before recovery: $e');
+    }
+    try {
+      // The native preview cleanup is posted to its worker thread.
+      // Wait for that cleanup before FFmpeg begins allocating memory.
+      await _hardware.invokeMethod<void>('close')
+          .timeout(const Duration(seconds: 5));
+    } catch (e) {
+      debugPrint('Scrub preview cleanup before recovery: $e');
+    }
+    if (!mounted) return;
+
+    try {
       final recovered = await Navigator.of(context).push<String>(
         MaterialPageRoute<String>(
           builder: (_) => GuidedRecoveryScreen(sourcePath: source),
         ),
       );
-      if (!mounted) {
-        return;
-      }
+      if (!mounted) return;
       if (recovered != null && await File(recovered).exists()) {
         _files..clear()..add(recovered);
         _index = 0;
-        await _openFile();
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _error = 'Recovery failed: $e');
+        setState(() => _error = 'Recovery could not open: $e');
+      }
+    } finally {
+      if (mounted) {
+        // Reload only after the recovery route closes, to avoid multiple
+        // decoders running while FFmpeg is repairing a large file.
+        await _openFile();
       }
     }
   }
