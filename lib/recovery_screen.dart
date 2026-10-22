@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/services.dart';
 import 'recovery_segments.dart';
 import 'raw_video_scan.dart';
 import 'file_identification.dart';
@@ -142,6 +143,29 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           'Reopen it with the file picker before retrying.');
       return;
     }
+    if (_mode == RecoveryMode.deepHighQuality && Platform.isAndroid) {
+      try {
+        const storage = MethodChannel('droid_vid_player/storage');
+        final available = await storage.invokeMethod<int>('availableBytes');
+        final inputBytes = await File(widget.sourcePath).length();
+        final reserve = inputBytes ~/ 2 + 1073741824;
+        if (available == null || available < reserve) {
+          if (mounted) {
+            setState(() => _error = 'Insufficient free space. '
+                'Reserve at least ${(reserve / 1073741824).toStringAsFixed(1)} GB '
+                'before Deep Recovery. No output was written.');
+          }
+          return;
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() => _error = 'Free space check failed; '
+              'recovery was not started: $e');
+        }
+        return;
+      }
+    }
+    if (!mounted) return;
     final generation = ++_generation;
     setState(() {
       _running = true;
