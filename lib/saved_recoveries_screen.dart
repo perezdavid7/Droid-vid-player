@@ -27,8 +27,8 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   }
 
   String size(int bytes) => bytes >= 1073741824
-      ? (bytes / 1073741824).toStringAsFixed(2) + ' GB'
-      : (bytes / 1048576).toStringAsFixed(1) + ' MB';
+      ? '${(bytes / 1073741824).toStringAsFixed(2)} GB'
+      : '${(bytes / 1048576).toStringAsFixed(1)} MB';
 
   Future<void> refresh() async {
     if (busy) { return; }
