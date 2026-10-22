@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
@@ -20,11 +22,15 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   bool loading = true;
   bool busy = false;
   String? message;
+  bool segmentsOnly = false;
+  List<Map<String, dynamic>> exits = [];
+  String? exitError;
 
   @override
   void initState() {
     super.initState();
     unawaited(refresh());
+    unawaited(loadExits());
   }
 
   String size(int bytes) => bytes >= 1073741824
@@ -57,6 +63,57 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
       if (mounted) setState(() => message = 'Cannot list recoveries: $e');
     } finally {
       if (mounted) setState(() => loading = false);
+    }
+  }
+
+
+  bool isSegment(String path) =>
+      RegExp(r'\.segment_\d+\.mkv$').hasMatch(p.basename(path));
+
+  Future<void> loadExits() async {
+    try {
+      const channel = MethodChannel('droid_vid_player/diagnostics');
+      final result = await channel.invokeListMethod<dynamic>(
+          'recentProcessExits');
+      if (!mounted) { return; }
+      setState(() {
+        exits = (result ?? const []).whereType<Map>().map((value) =>
+            Map<String, dynamic>.from(value)).toList();
+        exitError = null;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() => exitError = 'Exit history unavailable: $e');
+      }
+    }
+  }
+
+  String exitLabel(int reason) {
+    switch (reason) {
+      case 3: return 'Low memory';
+      case 4: return 'App crash';
+      case 5: return 'Native crash (possible FFmpeg or codec)';
+      case 6: return 'App not responding';
+      default: return 'Android exit reason $reason';
+    }
+  }
+
+  Future<void> readCheckpoint(String path) async {
+    try {
+      final file = File(path);
+      final length = await file.length();
+      final stream = file.openRead(0, length > 16384 ? 16384 : length);
+      final chunks = await stream.toList();
+      final contents = utf8.decode(chunks.expand((c) => c).toList(),
+          allowMalformed: true);
+      if (mounted) {
+        setState(() => message = 'Saved checkpoint: ' +
+            p.basename(path) + '\n\n' + contents);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => message = 'Checkpoint read failed: $e');
+      }
     }
   }
 
