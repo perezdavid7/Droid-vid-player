@@ -1,10 +1,11 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:gal/gal.dart';
 import 'package:path/path.dart' as p;
 import 'package:saf/saf.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
 
 /// A single destination preference used by Guided, Quick, and Deep Recovery.
 /// FFmpeg outputs locally first; a verified local copy is exported via
@@ -13,14 +14,46 @@ class RecoveryDestination {
   static const _uriKey = 'recovery_destination_uri';
   static const _labelKey = 'recovery_destination_label';
   static final Saf _saf = Saf();
-  static final SharedPreferencesAsync _prefs = SharedPreferencesAsync();
+  static const _storageName = 'recovery_destination.json';
 
-  static Future<String?> selectedUri() => _prefs.getString(_uriKey);
+  // Avoid the Android SharedPreferencesAsync Pigeon runtime ABI mismatch.
+  // A tiny app-private JSON file is sufficient for these two values.
+  static Future<File> _settingsFile() async {
+    final directory = await getApplicationSupportDirectory();
+    return File(p.join(directory.path, _storageName));
+  }
+
+  static Future<Map<String, String>> _loadSettings() async {
+    final file = await _settingsFile();
+    if (!await file.exists()) return <String, String>{};
+    final data = jsonDecode(await file.readAsString());
+    if (data is! Map) throw const FormatException('Invalid folder settings');
+    return <String, String>{
+      for (final entry in data.entries)
+        if (entry.key is String && entry.value is String)
+          entry.key as String: entry.value as String,
+    };
+  }
+
+  static Future<void> _storeSettings(Map<String, String> settings) async {
+    final file = await _settingsFile();
+    await file.parent.create(recursive: true);
+    final temporary = File('${file.path}.tmp');
+    await temporary.writeAsString(jsonEncode(settings), flush: true);
+    await temporary.rename(file.path);
+  }
+
+  static Future<String?> selectedUri() async {
+    return (await _loadSettings())[_uriKey];
+  }
 
   static Future<String> selectedLabel() async {
-    final uri = await selectedUri();
-    if (uri == null || uri.isEmpty) return 'Default: Gallery / Droid Vid Player';
-    return await _prefs.getString(_labelKey) ?? 'Selected Android folder';
+    final settings = await _loadSettings();
+    final uri = settings[_uriKey];
+    if (uri == null || uri.isEmpty) {
+      return 'Default: Gallery / Droid Vid Player';
+    }
+    return settings[_labelKey] ?? 'Selected Android folder';
   }
 
   static Future<bool> chooseFolder() async {
@@ -28,14 +61,15 @@ class RecoveryDestination {
     final selected = await _saf.pickDirectory(
       writePermission: true, persistablePermission: true);
     if (selected == null) return false;
-    await _prefs.setString(_uriKey, selected.uri);
-    await _prefs.setString(_labelKey, selected.name);
+    await _storeSettings(<String, String>{
+      _uriKey: selected.uri,
+      _labelKey: selected.name,
+    });
     return true;
   }
 
   static Future<void> useGallery() async {
-    await _prefs.remove(_uriKey);
-    await _prefs.remove(_labelKey);
+    await _storeSettings(<String, String>{});
   }
 
   static Future<String> exportRecoveredVideo(String localPath) async {
@@ -107,7 +141,10 @@ class _RecoveryDestinationPickerState extends State<RecoveryDestinationPicker> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _error = 'Cannot read saved folder: $e');
+      if (mounted) {
+        setState(() => _error = 'Could not load saved recovery folder.');
+      }
+      debugPrint('Folder preference read failed: $e');
     }
   }
 
@@ -120,7 +157,10 @@ class _RecoveryDestinationPickerState extends State<RecoveryDestinationPicker> {
         widget.onChanged?.call();
       }
     } catch (e) {
-      if (mounted) setState(() => _error = 'Unable to select folder: $e');
+      if (mounted) {
+        setState(() => _error = 'Unable to save the selected folder.');
+      }
+      debugPrint('Folder selection failed: $e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -133,7 +173,10 @@ class _RecoveryDestinationPickerState extends State<RecoveryDestinationPicker> {
       await _reload();
       widget.onChanged?.call();
     } catch (e) {
-      if (mounted) setState(() => _error = 'Unable to reset folder: $e');
+      if (mounted) {
+        setState(() => _error = 'Unable to reset the recovery folder.');
+      }
+      debugPrint('Folder reset failed: $e');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
