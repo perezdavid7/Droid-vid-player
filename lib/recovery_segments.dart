@@ -42,10 +42,10 @@ class RecoverySegments {
 
   static Future<List<File>> list(String directory, String stem) async {
     final dir = Directory(directory);
-    if (!await dir.exists()) return [];
+    if (!await dir.exists()) { return []; }
     final files = <File>[];
     await for (final item in dir.list(followLinks: false)) {
-      if (item is! File) continue;
+      if (item is! File) { continue; }
       final name = p.basename(item.path);
       if (name.startsWith('$stem.segment_') && name.endsWith('.mkv') &&
           RegExp(r'\.segment_\d{4,}\.mkv$').hasMatch(name)) {
@@ -73,7 +73,7 @@ class RecoverySegments {
       sessionId = session.getSessionId();
       return await done.future.timeout(const Duration(seconds: 45));
     } on TimeoutException {
-      if (sessionId != null) await FFmpegKit.cancel(sessionId);
+      if (sessionId != null) { await FFmpegKit.cancel(sessionId); }
       return false;
     } catch (_) {
       return false;
