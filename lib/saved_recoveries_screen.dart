@@ -74,9 +74,11 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
       });
       await completed.future.timeout(const Duration(seconds: 45));
       final code = await session.getReturnCode();
-      if (mounted) setState(() => message = ReturnCode.isSuccess(code)
-        ? 'Initial video decoding succeeded. Full playback is unverified.'
-        : 'Initial decoding failed. Do not delete this file yet.');
+      if (mounted) {
+        setState(() => message = ReturnCode.isSuccess(code)
+          ? 'Initial video decoding succeeded. Full playback is unverified.'
+          : 'Initial decoding failed. Do not delete this file yet.');
+      }
     } catch (e) {
       if (mounted) setState(() => message = 'Verification error: $e');
     } finally {
@@ -112,8 +114,10 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
         return;
       }
       await RecoveryDestination.exportToChosenFolder(path);
-      if (mounted) setState(() => message =
-          'Export finished. The private original was preserved.');
+      if (mounted) {
+        setState(() => message =
+            'Export finished. The private original was preserved.');
+      }
     } catch (e) {
       if (mounted) setState(() => message = 'Export failed: $e');
     } finally {
