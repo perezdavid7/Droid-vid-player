@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'recovery_segments.dart';
 import 'raw_video_scan.dart';
 import 'file_identification.dart';
 
@@ -176,6 +177,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       final outputFormat = quick ? 'matroska' : 'mp4';
       final finalPath = p.join(directory.path, '$stem.$extension');
       final partialPath = p.join(directory.path, '$stem.partial.$extension');
+      final segmentPattern = p.join(directory.path, '$stem.segment_%05d.mkv');
       final logPath = p.join(directory.path, '$stem.log.txt');
       if (await File(finalPath).exists() || await File(partialPath).exists()) {
         throw StateError('A recovery output with this name already exists.');
@@ -223,18 +225,21 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               '-c:a', 'aac', '-b:a', '192k',
               '-af', 'aresample=async=1000:first_pts=0',
             ];
-      final args = <String>[
+      final args = quick ? <String>[
         ...sharedArgs,
         ...encodingArgs,
         '-avoid_negative_ts', 'make_zero',
         '-max_muxing_queue_size', '1024',
         if (!quick) ...['-movflags', '+faststart'],
         '-f', outputFormat, '-n', partialPath,
-      ];
+      ] : RecoverySegments.args(
+          inputArgs: sharedArgs, pattern: segmentPattern,
+          legacyMpeg: legacyMpeg);
       final session = await FFmpegKit.executeWithArgumentsAsync(
         args,
         (finished) {
-          unawaited(_finish(finished, finalPath, partialPath, logPath, generation));
+          unawaited(_finish(finished, finalPath, partialPath, logPath, generation,
+              segmentStem: quick ? null : stem));
         },
         null,
         (statistics) {
@@ -269,8 +274,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     String finalPath,
     String partialPath,
     String logPath,
-    int generation,
-  ) async {
+    int generation, {String? segmentStem,
+  }) async {
     try {
       final code = await session.getReturnCode();
       final logs = await session.getLogsAsString();
@@ -289,11 +294,22 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         'FFmpeg log:\n$logs',
         flush: true,
       );
+      final segments = segmentStem == null ? <File>[] :
+          await RecoverySegments.list(p.dirname(finalPath), segmentStem);
       final partial = File(partialPath);
-      final hasPartial = await partial.exists() && await partial.length() > 4096;
-      final success = ReturnCode.isSuccess(code) && hasPartial && !_cancelling;
-      if (success) {
-        await partial.rename(finalPath);
+      final hasPartial = segmentStem == null &&
+          await partial.exists() && await partial.length() > 4096;
+      final success = segmentStem == null &&
+          ReturnCode.isSuccess(code) && hasPartial && !_cancelling;
+      if (success) await partial.rename(finalPath);
+      final verified = <String>[];
+      if (segmentStem != null) {
+        for (final file in segments) {
+          if (_cancelling) break;
+          if (await RecoverySegments.hasDecodableStart(file.path)) {
+            verified.add(file.path);
+          }
+        }
       }
       await _wake(false);
       if (!mounted || generation != _generation) return;
@@ -301,15 +317,19 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         _running = false;
         _logPath = logPath;
         _partialPath = hasPartial && !success ? partialPath : null;
-        _resultPath = success ? finalPath : null;
+        _resultPath = success ? finalPath :
+            verified.isNotEmpty ? verified.first : null;
         _sessionId = null;
-        _status = success
+        _status = segmentStem != null
+            ? 'Saved ${segments.length} MKV segments; ${verified.length} '
+              'passed initial decoding. Inspect in Saved Recoveries.'
+            : success
             ? (_mode == RecoveryMode.quickRepair
                 ? 'Quick Repair completed without recompressing video.'
                 : 'High-quality Deep Recovery completed.')
             : _cancelling ? 'Recovery stopped.' : 'Recovery incomplete.';
         _diagnostic = success ? null : diagnostic;
-        _error = success ? null : _mode == RecoveryMode.quickRepair
+        _error = (success || segmentStem != null) ? null : _mode == RecoveryMode.quickRepair
             ? 'Quick Repair could not remux these streams to MKV. '
               'Some MPEG headers or packets may be damaged. '
               'Review the diagnostic; Deep Recovery may help.'
