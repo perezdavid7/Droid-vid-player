@@ -49,6 +49,55 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   int _frames = 0;
   String? _diagnostic;
   Duration _processed = Duration.zero;
+  Timer? _segmentTimer;
+  String? _segmentStem;
+  String? _segmentDirectory;
+  bool _segmentBusy = false;
+  int _segmentCount = 0;
+  int _closedSegments = 0;
+  String? _latestSegment;
+
+  Future<void> _checkSegments() async {
+    final stem = _segmentStem;
+    final folder = _segmentDirectory;
+    if (stem == null || folder == null || _segmentBusy) { return; }
+    _segmentBusy = true;
+    try {
+      final files = await RecoverySegments.list(folder, stem);
+      final last = files.isEmpty ? null : p.basename(files.last.path);
+      final closed = files.isEmpty ? 0 : files.length - 1;
+      if (mounted) {
+        setState(() {
+          _segmentCount = files.length;
+          _closedSegments = closed;
+          _latestSegment = last;
+        });
+      }
+      // App-private checkpoint survives a crash, unlike progress text.
+      await File(p.join(folder, '$stem.checkpoint.txt')).writeAsString(
+        'Deep Recovery checkpoint\n'
+        'Source: $_name\n'
+        'Updated: ${DateTime.now().toIso8601String()}\n'
+        'Frames processed: $_frames\n'
+        'Reported time: ${_duration(_processed)}\n'
+        'Segments present: ${files.length}\n'
+        'Earlier potentially finalized segments: $closed\n'
+        'Last segment: ${last ?? "none"}\n'
+        'Verify individual clips before relying on them.\n',
+        flush: true,
+      );
+    } catch (e) {
+      debugPrint('Segment checkpoint error: $e');
+    } finally {
+      _segmentBusy = false;
+    }
+  }
+
+  void _stopSegmentTimer() {
+    _segmentTimer?.cancel();
+    _segmentTimer = null;
+  }
+
 
   String get _name => p.basename(widget.sourcePath);
   String _duration(Duration d) {
@@ -179,6 +228,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       _frames = 0;
       _diagnostic = null;
       _processed = Duration.zero;
+      _segmentCount = 0;
+      _closedSegments = 0;
+      _latestSegment = null;
       _status = _mode == RecoveryMode.quickRepair
           ? 'Quick Repair: rebuilding the container without re-encoding…'
           : 'Deep Recovery: decoding and rebuilding at high quality…';
@@ -202,6 +254,14 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       final finalPath = p.join(directory.path, '$stem.$extension');
       final partialPath = p.join(directory.path, '$stem.partial.$extension');
       final segmentPattern = p.join(directory.path, '$stem.segment_%05d.mkv');
+      if (!quick) {
+        _stopSegmentTimer();
+        _segmentStem = stem;
+        _segmentDirectory = directory.path;
+        _segmentTimer = Timer.periodic(const Duration(seconds: 3),
+            (_) => unawaited(_checkSegments()));
+        unawaited(_checkSegments());
+      }
       final logPath = p.join(directory.path, '$stem.log.txt');
       if (await File(finalPath).exists() || await File(partialPath).exists()) {
         throw StateError('A recovery output with this name already exists.');
@@ -283,6 +343,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         await FFmpegKit.cancel(_sessionId);
       }
     } catch (e) {
+      _stopSegmentTimer();
       await _wake(false);
       if (!mounted || generation != _generation) return;
       setState(() {
@@ -301,6 +362,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     int generation, {String? segmentStem,
   }) async {
     try {
+      _stopSegmentTimer();
+      if (segmentStem != null) { await _checkSegments(); }
       final code = await session.getReturnCode();
       final logs = await session.getLogsAsString();
       final diagnostic = logs.length > 1400
@@ -427,6 +490,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   void dispose() {
     // Avoid orphaning active recovery by disallowing route pop while running.
     // OS app termination can still stop the native encoder.
+    _stopSegmentTimer();
     if (!_running) unawaited(_wake(false));
     super.dispose();
   }
@@ -482,7 +546,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                       'when the input is readable. Quality is preserved, '
                       'but damaged frames and bad timestamps may remain.'
                     : _mode == RecoveryMode.deepHighQuality
-                        ? 'Decodes frames and audio into a new MP4. Requires '
+                        ? 'Decodes frames and audio into 90-second MKV segments. Requires '
                           'FFmpeg to recognize the input container.'
                         : 'Scans MP4 box markers and potential raw H.264/H.265 '
                           'headers without loading the full video in memory. '
@@ -511,6 +575,14 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 else ...[
                   Text('Processed output time: ${_duration(_processed)}'
                        '  ·  Frames: $_frames'),
+                  if (_mode == RecoveryMode.deepHighQuality) ...[
+                    Text('Segments created: $_segmentCount · '
+                        'Earlier segments closed: $_closedSegments'),
+                    if (_latestSegment != null)
+                      Text('Latest segment: $_latestSegment'),
+                    const Text('Closed segments must still pass a '
+                        'decoding test.', style: TextStyle(fontSize: 12)),
+                  ],
                   const Text('Progress is not a percentage because damaged '
                              'videos may report an incorrect duration.'),
                 ],
