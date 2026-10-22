@@ -249,21 +249,27 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                 title: const Text('Recent Android process exits'),
                 subtitle: const Text('Check why the app closed'),
                 children: [
-                  for (final item in exits.take(5))
-                    ListTile(
-                      dense: true,
-                      title: Text(exitLabel(
-                          (item['reason'] as num?)?.toInt() ?? -1)),
-                      subtitle: Text(
-                          '${DateTime.fromMillisecondsSinceEpoch((item['timestamp'] as num?)?.toInt() ?? 0).toLocal()}\n'
-                          '${item['description'] ?? ''}',
-                          maxLines: 4),
-                    ),
+                  SizedBox(height: 180, child: ListView(children: [
+                    for (final item in exits.take(5))
+                      ListTile(
+                        dense: true,
+                        title: Text(exitLabel(
+                            (item['reason'] as num?)?.toInt() ?? -1)),
+                        subtitle: Text(
+                            '${DateTime.fromMillisecondsSinceEpoch((item['timestamp'] as num?)?.toInt() ?? 0).toLocal()}\n'
+                            '${item['description'] ?? ''}',
+                            maxLines: 4),
+                      ),
+                  ])),
                 ],
               ),
             RecoveryDestinationPicker(disabled: busy),
             if (busy) const LinearProgressIndicator(),
-            if (message != null) SelectableText(message!),
+            if (message != null)
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 160),
+                child: SingleChildScrollView(child: SelectableText(message!)),
+              ),
           ]),
         ),
         Expanded(child: loading
