@@ -6,6 +6,7 @@ import android.media.MediaFormat
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
+import android.os.StatFs
 import android.view.Surface
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -44,6 +45,20 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         flutterEngineRef = flutterEngine
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "droid_vid_player/storage"
+        ).setMethodCallHandler { call, result ->
+            if (call.method == "availableBytes") {
+                try {
+                    result.success(StatFs(filesDir.absolutePath).availableBytes)
+                } catch (error: Exception) {
+                    result.error("STORAGE_CHECK_FAILED", error.message, null)
+                }
+            } else {
+                result.notImplemented()
+            }
+        }
         decodeThread.start()
         decode = Handler(decodeThread.looper)
         channel = MethodChannel(
