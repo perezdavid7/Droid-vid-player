@@ -183,6 +183,8 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
     }
   }
 
+  DateTime _lastProgressPaint = DateTime.fromMillisecondsSinceEpoch(0);
+
   Future<FFmpegSession> _execute(List<String> args) async {
     final completed = Completer<FFmpegSession>();
     _frames = 0;
@@ -195,9 +197,11 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
       (statistics) {
         if (!mounted) return;
         final count = statistics.getVideoFrameNumber();
-        if (count > _frames) {
-          setState(() => _frames = count);
-        }
+        if (count <= _frames) return;
+        final now = DateTime.now();
+        if (now.difference(_lastProgressPaint).inMilliseconds < 500) return;
+        _lastProgressPaint = now;
+        setState(() => _frames = count);
       },
     );
     _activeSession = session.getSessionId();
@@ -372,6 +376,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
         '-hide_banner', '-nostdin', '-loglevel', 'warning',
         '-fflags', '+genpts+discardcorrupt', '-err_detect', 'ignore_err',
         '-probesize', '20000000', '-analyzeduration', '15000000',
+        '-threads', '2',
         if (forcedInput != null) ...['-f', forcedInput],
         '-i', widget.sourcePath,
         '-map', '0:v:0', '-map', '0:a:0?', '-sn', '-dn',
@@ -409,7 +414,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
               ]
             else
               ...['-fps_mode', 'vfr'],
-            '-c:v', 'mpeg4', '-q:v', '2',
+            '-c:v', 'mpeg4', '-q:v', '2', '-threads:v', '2',
             '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '192k',
             '-af', 'aresample=async=1000:first_pts=0',
