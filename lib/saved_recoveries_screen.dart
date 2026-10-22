@@ -31,7 +31,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
       : (bytes / 1048576).toStringAsFixed(1) + ' MB';
 
   Future<void> refresh() async {
-    if (busy) return;
+    if (busy) { return; }
     setState(() { loading = true; message = null; });
     try {
       final dir = Directory(p.join(
@@ -41,17 +41,17 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
       final info = <FileStat>[];
       if (await dir.exists()) {
         await for (final entity in dir.list(followLinks: false)) {
-          if (entity is! File) continue;
+          if (entity is! File) { continue; }
           found.add(entity.path);
           info.add(await entity.stat());
         }
       }
       final indices = List<int>.generate(found.length, (i) => i);
       indices.sort((a, b) => info[b].size.compareTo(info[a].size));
-      if (mounted) setState(() {
+      if (mounted) { setState(() {
         paths = [for (final i in indices) found[i]];
         stats = [for (final i in indices) info[i]];
-      });
+      }); }
     } catch (e) {
       if (mounted) setState(() => message = 'Cannot list recoveries: $e');
     } finally {
@@ -87,12 +87,12 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   Future<void> export(String path) async {
     if (busy) return;
     final length = await File(path).length();
-    if (!mounted) return;
+    if (!mounted) { return; }
     final ok = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: const Text('Export a copy?'),
-        content: Text('This file is ' + size(length) + '. Exporting may '
+        content: Text('This file is ${size(length)}. Exporting may '
             'need that much additional free storage. The private original '
             'will not be deleted.'),
         actions: [
@@ -103,7 +103,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
         ],
       ),
     );
-    if (ok != true || !mounted) return;
+    if (ok != true || !mounted) { return; }
     setState(() { busy = true; message = 'Exporting file…'; });
     try {
       final uri = await RecoveryDestination.selectedUri();
@@ -136,8 +136,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
         Padding(
           padding: const EdgeInsets.all(12),
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            Text('Files: ' + paths.length.toString() +
-                ' · Total: ' + size(total)),
+            Text('Files: ${paths.length} · Total: ${size(total)}'),
             const Text('No files will be deleted. A partial video may '
                 'still contain recoverable footage.'),
             RecoveryDestinationPicker(disabled: busy),
@@ -164,9 +163,9 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                   padding: const EdgeInsets.all(10),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Text(name, maxLines: 3, overflow: TextOverflow.ellipsis),
-                    Text(size(stats[i].size) +
-                        (incomplete ? ' · Incomplete/working' : ' · Saved') +
-                        (video ? '' : ' · Non-video')),
+                    Text('${size(stats[i].size)}'
+                        '${incomplete ? ' · Incomplete/working' : ' · Saved'}'
+                        '${video ? '' : ' · Non-video'}'),
                     Wrap(spacing: 6, children: [
                       OutlinedButton(
                         onPressed: busy || !video ? null : () => verify(path),
