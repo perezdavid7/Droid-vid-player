@@ -128,6 +128,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     }
   }
 
+  DateTime _lastRecoveryPaint = DateTime.fromMillisecondsSinceEpoch(0);
+
   Future<void> _start() async {
     if (_running || _savingGallery) return;
     if (_mode == RecoveryMode.advancedAnalysis) {
@@ -188,6 +190,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         '-hide_banner', '-nostdin', '-loglevel', 'warning',
         '-fflags', '+genpts+discardcorrupt',
         '-err_detect', 'ignore_err',
+        '-threads', '2',
         '-i', widget.sourcePath,
         '-map', '0:v:0', '-map', '0:a:0?',
         '-sn', '-dn',
@@ -210,7 +213,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 '-r', '30',
                 '-fps_mode', 'cfr',
               ] else ...['-fps_mode', 'vfr'],
-              '-c:v', 'mpeg4', '-q:v', '2',
+              '-c:v', 'mpeg4', '-q:v', '2', '-threads:v', '2',
               '-pix_fmt', 'yuv420p',
               '-c:a', 'aac', '-b:a', '192k',
               '-af', 'aresample=async=1000:first_pts=0',
@@ -231,6 +234,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         null,
         (statistics) {
           if (!mounted || generation != _generation) return;
+          final now = DateTime.now();
+          if (now.difference(_lastRecoveryPaint).inMilliseconds < 500) return;
+          _lastRecoveryPaint = now;
           setState(() {
             _processed = Duration(milliseconds: statistics.getTime().clamp(0, 1 << 53).toInt());
             _frames = statistics.getVideoFrameNumber();
