@@ -214,6 +214,12 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   @override
   Widget build(BuildContext context) {
     final total = stats.fold<int>(0, (sum, stat) => sum + stat.size);
+    final segmentCount = paths.where(isSegment).length;
+    final visible = List<int>.generate(paths.length, (index) => index)
+        .where((i) => !segmentsOnly || isSegment(paths[i])).toList();
+    if (segmentsOnly) {
+      visible.sort((a, b) => paths[a].compareTo(paths[b]));
+    }
     return Scaffold(
       appBar: AppBar(title: const Text('Saved Recoveries'), actions: [
         IconButton(
@@ -229,6 +235,35 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
             Text('Files: ${paths.length} · Total: ${size(total)}'),
             const Text('No files will be deleted. A partial video may '
                 'still contain recoverable footage.'),
+            Wrap(children: [
+              FilterChip(
+                label: Text('Segments only (' + segmentCount.toString() + ')'),
+                selected: segmentsOnly,
+                onSelected: (value) =>
+                    setState(() => segmentsOnly = value),
+              ),
+            ]),
+            if (exitError != null)
+              Text(exitError!, style: const TextStyle(fontSize: 12)),
+            if (exits.isNotEmpty)
+              ExpansionTile(
+                title: const Text('Recent Android process exits'),
+                subtitle: const Text('Check why the app closed'),
+                children: [
+                  for (final item in exits.take(5))
+                    ListTile(
+                      dense: true,
+                      title: Text(exitLabel(
+                          (item['reason'] as num?)?.toInt() ?? -1)),
+                      subtitle: Text(
+                          DateTime.fromMillisecondsSinceEpoch(
+                              (item['timestamp'] as num?)?.toInt() ?? 0)
+                              .toLocal().toString() +
+                          '\n' + (item['description'] ?? '').toString(),
+                          maxLines: 4),
+                    ),
+                ],
+              ),
             RecoveryDestinationPicker(disabled: busy),
             if (busy) const LinearProgressIndicator(),
             if (message != null) SelectableText(message!),
@@ -236,12 +271,13 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
         ),
         Expanded(child: loading
           ? const Center(child: CircularProgressIndicator())
-          : paths.isEmpty
+          : visible.isEmpty
             ? const Center(child: Text(
                 'No files found in the private recovery folder. '
                 'Other app data may exist elsewhere.',
                 textAlign: TextAlign.center))
-            : ListView.builder(itemCount: paths.length, itemBuilder: (context, i) {
+            : ListView.builder(itemCount: visible.length, itemBuilder: (context, row) {
+                final i = visible[row];
                 final path = paths[i];
                 final name = p.basename(path);
                 final incomplete = name.contains('.partial.') ||
@@ -251,9 +287,18 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                     '.mpeg', '.avi'}.contains(ext);
                 final similar = paths.where((other) =>
                     sourceGroup(p.basename(other)) == sourceGroup(name)).length;
+                final match = RegExp(r'\.segment_(\d+)\.mkv$')
+                    .firstMatch(name);
+                final segmentNumber = match == null ? null :
+                    (int.tryParse(match.group(1) ?? '') ?? 0) + 1;
+                final checkpoint = name.endsWith('.checkpoint.txt');
                 return Card(child: Padding(
                   padding: const EdgeInsets.all(10),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    if (segmentNumber != null)
+                      Text('Segment ' + segmentNumber.toString(),
+                          style: const TextStyle(fontSize: 18,
+                              fontWeight: FontWeight.bold)),
                     Text(name, maxLines: 3, overflow: TextOverflow.ellipsis),
                     Text('${size(stats[i].size)}'
                         '${incomplete ? ' · Incomplete/working' : ' · Saved'}'
@@ -262,6 +307,11 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                       Text('$similar attempts share this source name; '
                           'not confirmed byte-for-byte duplicates.'),
                     Wrap(spacing: 6, children: [
+                      if (checkpoint)
+                        OutlinedButton(
+                          onPressed: busy ? null : () => readCheckpoint(path),
+                          child: const Text('View checkpoint'),
+                        ),
                       OutlinedButton(
                         onPressed: busy || !video ? null : () => verify(path),
                         child: const Text('Verify sample'),
