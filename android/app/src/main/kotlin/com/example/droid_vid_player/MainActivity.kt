@@ -1,5 +1,8 @@
 package com.example.droid_vid_player
 
+import android.app.ActivityManager
+import android.app.ApplicationExitInfo
+import android.os.Build
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -57,6 +60,34 @@ class MainActivity : FlutterActivity() {
                 }
             } else {
                 result.notImplemented()
+            }
+        }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "droid_vid_player/diagnostics"
+        ).setMethodCallHandler { call, result ->
+            if (call.method != "recentProcessExits") {
+                result.notImplemented()
+            } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                result.success(emptyList<Map<String, Any?>>())
+            } else {
+                try {
+                    val manager = getSystemService(ACTIVITY_SERVICE) as ActivityManager
+                    val recent = manager.getHistoricalProcessExitReasons(
+                        packageName, 0, 8
+                    ).map { info ->
+                        mapOf<String, Any?>(
+                            "timestamp" to info.timestamp,
+                            "reason" to info.reason,
+                            "description" to (info.description ?: "").take(240),
+                            "pssKb" to info.pss,
+                            "rssKb" to info.rss
+                        )
+                    }
+                    result.success(recent)
+                } catch (error: Exception) {
+                    result.error("EXIT_DIAGNOSTICS_FAILED", error.message, null)
+                }
             }
         }
         decodeThread.start()
