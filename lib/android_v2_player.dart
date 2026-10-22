@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'package:video_player/video_player.dart';
 
 import 'guided_recovery_screen.dart';
+import 'saved_recoveries_screen.dart';
 
 /// V2: drag the picture through video frames. A stationary finger is a
 /// stationary frame; this is intentionally scrubbing, not reverse playback.
@@ -816,6 +817,18 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     }
   }
 
+  Future<void> _savedRecoveries() async {
+    final file = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (_) => const SavedRecoveriesScreen(),
+      ),
+    );
+    if (!mounted || file == null || !await File(file).exists()) return;
+    _files..clear()..add(file);
+    _index = 0;
+    await _openFile();
+  }
+
   Future<void> _compare() async {
     if (widget.legacyBuilder == null) {
       return;
@@ -941,11 +954,15 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
                 if (_ready) {
                   unawaited(_video!.setLooping(_repeat));
                 }
+              } else if (action == 'saved') {
+                unawaited(_savedRecoveries());
               } else if (action == 'legacy') {
                 unawaited(_compare());
               }
             },
             itemBuilder: (_) => [
+              const PopupMenuItem(value: 'saved',
+                child: Text('Saved Recoveries')),
               PopupMenuItem(value: 'fill',
                 child: Text(_fill ? 'Fit video' : 'Fill display')),
               PopupMenuItem(value: 'repeat',
@@ -1110,6 +1127,11 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.white70)),
           const SizedBox(height: 20),
+          OutlinedButton.icon(
+            onPressed: () => unawaited(_savedRecoveries()),
+            icon: const Icon(Icons.folder_copy_outlined),
+            label: const Text('Saved Recoveries')),
+          const SizedBox(height: 8),
           FilledButton.icon(
             onPressed: () => unawaited(_pickFile()),
             icon: const Icon(Icons.folder_open),
