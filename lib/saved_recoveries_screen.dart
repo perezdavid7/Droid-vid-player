@@ -107,8 +107,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
       final contents = utf8.decode(chunks.expand((c) => c).toList(),
           allowMalformed: true);
       if (mounted) {
-        setState(() => message = 'Saved checkpoint: ' +
-            p.basename(path) + '\n\n' + contents);
+        setState(() => message = 'Saved checkpoint: ${p.basename(path)}\n\n$contents');
       }
     } catch (e) {
       if (mounted) {
@@ -237,7 +236,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                 'still contain recoverable footage.'),
             Wrap(children: [
               FilterChip(
-                label: Text('Segments only (' + segmentCount.toString() + ')'),
+                label: Text('Segments only ($segmentCount)'),
                 selected: segmentsOnly,
                 onSelected: (value) =>
                     setState(() => segmentsOnly = value),
@@ -256,10 +255,8 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                       title: Text(exitLabel(
                           (item['reason'] as num?)?.toInt() ?? -1)),
                       subtitle: Text(
-                          DateTime.fromMillisecondsSinceEpoch(
-                              (item['timestamp'] as num?)?.toInt() ?? 0)
-                              .toLocal().toString() +
-                          '\n' + (item['description'] ?? '').toString(),
+                          '${DateTime.fromMillisecondsSinceEpoch((item['timestamp'] as num?)?.toInt() ?? 0).toLocal()}\n'
+                          '${item['description'] ?? ''}',
                           maxLines: 4),
                     ),
                 ],
@@ -296,7 +293,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                   padding: const EdgeInsets.all(10),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     if (segmentNumber != null)
-                      Text('Segment ' + segmentNumber.toString(),
+                      Text('Segment $segmentNumber',
                           style: const TextStyle(fontSize: 18,
                               fontWeight: FontWeight.bold)),
                     Text(name, maxLines: 3, overflow: TextOverflow.ellipsis),
