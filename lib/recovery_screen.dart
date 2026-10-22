@@ -169,8 +169,13 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       final suffix = _mode == RecoveryMode.quickRepair
           ? 'quick_repair' : 'deep_high_quality';
       final stem = '${baseName}_${suffix}_${DateTime.now().millisecondsSinceEpoch}';
-      final finalPath = p.join(directory.path, '$stem.mp4');
-      final partialPath = p.join(directory.path, '$stem.partial.mp4');
+      // Preserve MPEG-2/MP2 codecs in MKV for lossless Quick Repair.
+      // Deep Recovery continues re-encoding to a new MP4.
+      final quick = _mode == RecoveryMode.quickRepair;
+      final extension = quick ? 'mkv' : 'mp4';
+      final outputFormat = quick ? 'matroska' : 'mp4';
+      final finalPath = p.join(directory.path, '$stem.$extension');
+      final partialPath = p.join(directory.path, '$stem.partial.$extension');
       final logPath = p.join(directory.path, '$stem.log.txt');
       if (await File(finalPath).exists() || await File(partialPath).exists()) {
         throw StateError('A recovery output with this name already exists.');
@@ -181,8 +186,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
 
       // Both modes run forward with no seeks.
       // Quick Repair copies compressed streams unchanged, so it cannot introduce
-      // new generation loss. This does not necessarily fix all bad timestamps,
-      // and codecs not permitted in MP4 will make it fail.
+      // new generation loss. An MKV container accepts legacy codec pairs
+      // better than MP4, but damaged packets and timestamps may remain.
       // Deep Recovery re-encodes decoded streams using a higher-quality MPEG-4
       // setting (q:v=2 rather than the previous q:v=5). This can still lose
       // quality, and it cannot reconstruct missing/damaged frames.
@@ -223,8 +228,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         ...encodingArgs,
         '-avoid_negative_ts', 'make_zero',
         '-max_muxing_queue_size', '1024',
-        '-movflags', '+faststart',
-        '-f', 'mp4', '-n', partialPath,
+        if (!quick) ...['-movflags', '+faststart'],
+        '-f', outputFormat, '-n', partialPath,
       ];
       final session = await FFmpegKit.executeWithArgumentsAsync(
         args,
@@ -305,8 +310,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             : _cancelling ? 'Recovery stopped.' : 'Recovery incomplete.';
         _diagnostic = success ? null : diagnostic;
         _error = success ? null : _mode == RecoveryMode.quickRepair
-            ? 'Quick Repair could not copy these streams to MP4, or their '
-              'metadata is damaged. Try Deep Recovery instead.'
+            ? 'Quick Repair could not remux these streams to MKV. '
+              'Some MPEG headers or packets may be damaged. '
+              'Review the diagnostic; Deep Recovery may help.'
             : 'The input may contain unsupported or unrecoverable data. '
               'Check the FFmpeg diagnostic below.';
       });
@@ -428,8 +434,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               ),
               Text(
                 _mode == RecoveryMode.quickRepair
-                    ? 'Copies original compressed streams without re-encoding '
-                      'when the container remains readable.'
+                    ? 'Copies original streams into MKV without re-encoding '
+                      'when the input is readable. Quality is preserved, '
+                      'but damaged frames and bad timestamps may remain.'
                     : _mode == RecoveryMode.deepHighQuality
                         ? 'Decodes frames and audio into a new MP4. Requires '
                           'FFmpeg to recognize the input container.'
