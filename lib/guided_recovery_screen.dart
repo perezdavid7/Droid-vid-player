@@ -395,14 +395,24 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
         final args = <String>[
           ...inputArgs,
           if (quick) ...['-c', 'copy'] else ...[
-            // Keep the previously field-tested manual Deep Recovery codec
-            // settings. q:v=1 and setpts were experimental and produced an
-            // MP4 that the Android player reported it could not decode.
+            // MPEG program streams may change dimensions and contain
+            // discontinuous timestamps. Rebuild from decodable frames.
+            if (_identified?.format.startsWith('MPEG program stream') == true ||
+                <String>{'.mpg', '.mpeg', '.m2v', '.vob'}
+                    .contains(p.extension(widget.sourcePath).toLowerCase()))
+              ...[
+                '-vf',
+                'scale=720:480:force_original_aspect_ratio=decrease,'
+                'pad=720:480:(ow-iw)/2:(oh-ih)/2,setsar=1,'
+                'setpts=N/(30*TB)',
+                '-r', '30', '-fps_mode', 'cfr',
+              ]
+            else
+              ...['-fps_mode', 'vfr'],
             '-c:v', 'mpeg4', '-q:v', '2',
             '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '192k',
             '-af', 'aresample=async=1000:first_pts=0',
-            '-fps_mode', 'vfr',
           ],
           '-avoid_negative_ts', 'make_zero',
           '-max_muxing_queue_size', '1024',
