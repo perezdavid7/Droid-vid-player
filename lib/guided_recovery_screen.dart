@@ -210,7 +210,7 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
       ]).timeout(const Duration(seconds: 30));
       final code = await session.getReturnCode();
       final logs = await session.getLogsAsString();
-      final matches = RegExp(r'frame=\\s*(\\d+)').allMatches(logs);
+      final matches = RegExp(r'frame=\s*(\d+)').allMatches(logs);
       var decoded = 0;
       for (final m in matches) {
         final count = int.tryParse(m.group(1) ?? '') ?? 0;
