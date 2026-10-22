@@ -24,6 +24,8 @@ class RawVideoScan {
   final int psAudioPackets;
   final int mpegSequenceHeaders;
   final int mpegPictureHeaders;
+  final int? mpegSequenceOffset;
+  final int validatedMpegSequenceHeaders;
   final String firstBytesHex;
 
   const RawVideoScan({
@@ -45,8 +47,14 @@ class RawVideoScan {
     required this.psAudioPackets,
     required this.mpegSequenceHeaders,
     required this.mpegPictureHeaders,
+    required this.mpegSequenceOffset,
+    required this.validatedMpegSequenceHeaders,
     required this.firstBytesHex,
   });
+
+  // Evidence for a *bounded decoder probe*, not proof of playable video.
+  bool get canProbeMpegVideo =>
+      mpegSequenceOffset != null && mpegPictureHeaders >= 8;
 
   bool get canCopyH264 =>
       h264Offset != null && h264Sps > 0 && h264Pps > 0 && h264Idr > 0;
@@ -68,6 +76,9 @@ class RawVideoScan {
           'video PES=$psVideoPackets, audio PES=$psAudioPackets',
       'MPEG-1/2 video start codes: sequence=$mpegSequenceHeaders, '
           'picture=$mpegPictureHeaders',
+      'Plausible MPEG-2 sequence headers: $validatedMpegSequenceHeaders'
+          '${mpegSequenceOffset == null ? '' : ', first at byte $mpegSequenceOffset'}'
+          ' (not yet decoded)',
       'Annex-B H.264 signatures: SPS=$h264Sps, PPS=$h264Pps, IDR=$h264Idr',
       'Annex-B H.265 signatures: VPS=$h265Vps, SPS=$h265Sps, '
           'PPS=$h265Pps, keyframes=$h265Irap',
@@ -125,7 +136,8 @@ Future<RawVideoScan> scanRawVideo(
   var vps265 = 0, sps265 = 0, pps265 = 0, irap265 = 0;
   var psPackHeaders = 0, psVideoPackets = 0, psAudioPackets = 0;
   var mpegSequenceHeaders = 0, mpegPictureHeaders = 0;
-  int? start264, start265;
+  int? start264, start265, startMpegSequence;
+  var plausibleMpegSequences = 0;
   var consumed = 0;
   var trailing = <int>[];
   final firstBytes = <int>[];
@@ -155,7 +167,24 @@ Future<RawVideoScan> scanRawVideo(
       if (header == 0xBA) psPackHeaders++;
       if (header >= 0xE0 && header <= 0xEF) psVideoPackets++;
       if (header >= 0xC0 && header <= 0xDF) psAudioPackets++;
-      if (header == 0xB3) mpegSequenceHeaders++;
+      if (header == 0xB3) {
+        mpegSequenceHeaders++;
+        // MPEG-1/2 sequence header carries width, height, aspect and frame
+        // rate immediately after 00 00 01 B3. Screen out impossible sizes
+        // and reserved frame-rate codes before reporting a probe position.
+        final w = (data[i + prefix + 1] << 4) |
+            (data[i + prefix + 2] >> 4);
+        final h = ((data[i + prefix + 2] & 0x0f) << 8) |
+            data[i + prefix + 3];
+        final aspect = data[i + prefix + 4] >> 4;
+        final frameRate = data[i + prefix + 4] & 0x0f;
+        if (w >= 48 && w <= 4095 && h >= 48 && h <= 4095 &&
+            aspect >= 1 && aspect <= 4 &&
+            frameRate >= 1 && frameRate <= 8) {
+          plausibleMpegSequences++;
+          startMpegSequence ??= absolute;
+        }
+      }
       if (header == 0x00) mpegPictureHeaders++;
       if ((header & 0x80) == 0) {
         switch (header & 0x1f) {
@@ -226,6 +255,8 @@ Future<RawVideoScan> scanRawVideo(
     psPackHeaders: psPackHeaders, psVideoPackets: psVideoPackets,
     psAudioPackets: psAudioPackets, mpegSequenceHeaders: mpegSequenceHeaders,
     mpegPictureHeaders: mpegPictureHeaders,
+    mpegSequenceOffset: startMpegSequence,
+    validatedMpegSequenceHeaders: plausibleMpegSequences,
     firstBytesHex: firstBytes.map(
       (byte) => byte.toRadixString(16).padLeft(2, '0'),
     ).join(' '),
