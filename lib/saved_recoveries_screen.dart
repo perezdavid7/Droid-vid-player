@@ -6,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
 import 'recovery_destination.dart';
+import 'raw_video_scan.dart';
 
 class SavedRecoveriesScreen extends StatefulWidget {
   const SavedRecoveriesScreen({super.key});
@@ -86,6 +87,34 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     }
   }
 
+  Future<void> inspectBytes(String path) async {
+    if (busy) { return; }
+    setState(() {
+      busy = true;
+      message = 'Scanning internal byte markers without creating a copy…';
+    });
+    try {
+      final scan = await scanRawVideo(path);
+      if (mounted) {
+        setState(() => message = scan.diagnostic +
+            '\nMarkers are not evidence of decodable frames. '
+            'An unfinished MP4 may lack the movie index.');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => message = 'Byte inspection failed: $e');
+      }
+    } finally {
+      if (mounted) { setState(() => busy = false); }
+    }
+  }
+
+  String sourceGroup(String filename) {
+    final source = filename.split(RegExp(
+        r'_(?:deep_high_quality|quick_repair|guided)_')).first;
+    return source;
+  }
+
   Future<void> export(String path) async {
     if (busy) return;
     final length = await File(path).length();
@@ -163,6 +192,8 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                 final ext = p.extension(path).toLowerCase();
                 final video = const {'.mp4', '.mkv', '.mov', '.mpg',
                     '.mpeg', '.avi'}.contains(ext);
+                final similar = paths.where((other) =>
+                    sourceGroup(p.basename(other)) == sourceGroup(name)).length;
                 return Card(child: Padding(
                   padding: const EdgeInsets.all(10),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -170,10 +201,18 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                     Text('${size(stats[i].size)}'
                         '${incomplete ? ' · Incomplete/working' : ' · Saved'}'
                         '${video ? '' : ' · Non-video'}'),
+                    if (similar > 1)
+                      Text('$similar attempts share this source name; '
+                          'not confirmed byte-for-byte duplicates.'),
                     Wrap(spacing: 6, children: [
                       OutlinedButton(
                         onPressed: busy || !video ? null : () => verify(path),
                         child: const Text('Verify sample'),
+                      ),
+                      OutlinedButton(
+                        onPressed: busy || !video ? null :
+                            () => inspectBytes(path),
+                        child: const Text('Inspect bytes'),
                       ),
                       OutlinedButton(
                         onPressed: busy || !video ? null :
