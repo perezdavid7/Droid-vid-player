@@ -50,6 +50,8 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
   double _progress = 0;
   int _frames = 0;
   int? _activeSession;
+  String? _mpegProbeResult;
+  bool _mpegProbePassed = false;
   final _attemptLogs = <String>[];
 
   @override
@@ -159,6 +161,8 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
         _scan = result;
         _didDeepScan = true;
         _canAttempt = streamCandidate;
+        _mpegProbeResult = null;
+        _mpegProbePassed = false;
         _diagnostics = '$_diagnostics\n\n${result.diagnostic}';
         _status = 'Media-structure scan completed.';
         _advice = streamCandidate
@@ -175,6 +179,61 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
         setState(() {
           _status = 'File scan failed.';
           _error = e.toString();
+        });
+      }
+    } finally {
+      await _wake(false);
+      if (mounted) setState(() => _running = false);
+    }
+  }
+
+  // A bounded probe deliberately avoids remuxing or re-encoding the
+  // complete source. The scanner's start codes alone can be false positives.
+  Future<void> _probeEmbeddedMpeg() async {
+    final offset = _scan?.mpegSequenceOffset;
+    if (_running || offset == null) return;
+    setState(() {
+      _running = true;
+      _cancelled = false;
+      _mpegProbePassed = false;
+      _mpegProbeResult = null;
+      _status = 'Checking candidate MPEG-2 frames…';
+    });
+    await _wake(true);
+    try {
+      final session = await _execute([
+        '-hide_banner', '-nostdin', '-loglevel', 'info',
+        '-f', 'mpegvideo', '-skip_initial_bytes', '$offset',
+        '-i', widget.sourcePath,
+        '-map', '0:v:0', '-an', '-frames:v', '8',
+        '-f', 'null', '-',
+      ]).timeout(const Duration(seconds: 30));
+      final code = await session.getReturnCode();
+      final logs = await session.getLogsAsString();
+      final matches = RegExp(r'frame=\\s*(\\d+)').allMatches(logs);
+      var decoded = 0;
+      for (final m in matches) {
+        final count = int.tryParse(m.group(1) ?? '') ?? 0;
+        if (count > decoded) decoded = count;
+      }
+      if (!mounted) return;
+      final passed = ReturnCode.isSuccess(code) && decoded >= 3;
+      setState(() {
+        _mpegProbePassed = passed;
+        _mpegProbeResult = passed
+            ? 'FFmpeg decoded $decoded frames from the candidate MPEG-2 '
+                'sequence near byte $offset. This is evidence of surviving '
+                'video, not a guarantee the rest can be recovered.'
+            : 'The candidate at byte $offset did not pass a bounded '
+                'decoder check (exit $code, frames $decoded). Byte markers '
+                'alone are insufficient to establish recoverable MPEG-2.';
+        _status = 'Embedded MPEG-2 validation complete.';
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _mpegProbeResult = 'Embedded MPEG-2 probe could not complete: $e';
+          _status = 'Embedded MPEG-2 validation inconclusive.';
         });
       }
     } finally {
@@ -573,6 +632,20 @@ class _GuidedRecoveryScreenState extends State<GuidedRecoveryScreen> {
               const SizedBox(height: 10),
               Text(_advice, style: const TextStyle(
                   color: Colors.amberAccent)),
+              if (!_running && _didDeepScan &&
+                  _scan?.canProbeMpegVideo == true)
+                OutlinedButton.icon(
+                  onPressed: _probeEmbeddedMpeg,
+                  icon: const Icon(Icons.fact_check_outlined),
+                  label: const Text('Validate embedded MPEG-2 frames'),
+                ),
+              if (_mpegProbeResult != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Text(_mpegProbeResult!,
+                    style: TextStyle(color: _mpegProbePassed
+                        ? Colors.greenAccent : Colors.amberAccent)),
+                ),
               if (_running) ...[
                 const SizedBox(height: 12),
                 _progress > 0 && _progress < 1
