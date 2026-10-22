@@ -63,12 +63,16 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     if (busy) return;
     setState(() { busy = true; message = 'Checking the first five video frames…'; });
     try {
+      final completed = Completer<void>();
       final session = await FFmpegKit.executeWithArgumentsAsync([
         '-hide_banner', '-nostdin', '-loglevel', 'error',
         '-threads', '2', '-i', path,
         '-map', '0:v:0', '-an', '-frames:v', '5',
         '-f', 'null', '-',
-      ], (session) {});
+      ], (session) {
+        if (!completed.isCompleted) completed.complete();
+      });
+      await completed.future.timeout(const Duration(seconds: 45));
       final code = await session.getReturnCode();
       if (mounted) setState(() => message = ReturnCode.isSuccess(code)
         ? 'Initial video decoding succeeded. Full playback is unverified.'
@@ -82,6 +86,24 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
 
   Future<void> export(String path) async {
     if (busy) return;
+    final length = await File(path).length();
+    if (!mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Export a copy?'),
+        content: Text('This file is ' + size(length) + '. Exporting may '
+            'need that much additional free storage. The private original '
+            'will not be deleted.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Export')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
     setState(() { busy = true; message = 'Exporting file…'; });
     try {
       final uri = await RecoveryDestination.selectedUri();
