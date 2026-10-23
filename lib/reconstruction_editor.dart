@@ -55,6 +55,64 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
   bool _busy = false;
   String? _notice;
   String? _error;
+  String? _segmentFilter;
+
+  int _segmentNumber(String path) {
+    final match = RegExp(r'\.segment_(\d+)\.mkv$')
+        .firstMatch(p.basename(path));
+    final number = int.tryParse(match?.group(1) ?? '');
+    return number == null ? 0 : number + 1;
+  }
+
+  String _segmentLabel(String path) =>
+      'Segment ${_segmentNumber(path)}';
+
+  String _pieceLabel(_Piece piece) {
+    final siblings = _pieces.where((x) => x.path == piece.path).toList()
+      ..sort((a, b) => a.start.compareTo(b.start));
+    return '${_segmentLabel(piece.path)} · Part '
+        '${siblings.indexOf(piece) + 1} of ${siblings.length}';
+  }
+
+  List<String> get _sourceSegments {
+    final paths = _pieces.map((x) => x.path).toSet().toList();
+    paths.sort((a, b) {
+      final numberOrder = _segmentNumber(a).compareTo(_segmentNumber(b));
+      return numberOrder != 0 ? numberOrder : a.compareTo(b);
+    });
+    return paths;
+  }
+
+  List<_Piece> get _navigationPieces {
+    final paths = _sourceSegments;
+    final ordered = [..._pieces];
+    ordered.sort((a, b) {
+      final pathCompare = paths.indexOf(a.path).compareTo(paths.indexOf(b.path));
+      return pathCompare != 0 ? pathCompare : a.start.compareTo(b.start);
+    });
+    return ordered;
+  }
+
+  void _jumpPiece(int delta) {
+    if (_busy) return;
+    final ordered = _navigationPieces;
+    final index = ordered.indexWhere((x) => x.id == _activeId);
+    final next = index + delta;
+    if (index < 0 || next < 0 || next >= ordered.length) return;
+    if (_segmentFilter != null) {
+      setState(() => _segmentFilter = ordered[next].path);
+    }
+    unawaited(_open(ordered[next]));
+  }
+
+  void _chooseSegment(String? path) {
+    if (_busy) return;
+    setState(() => _segmentFilter = path);
+    if (path == null) return;
+    final sameSource = _navigationPieces.where((x) => x.path == path).toList();
+    if (sameSource.isNotEmpty) unawaited(_open(sameSource.first));
+  }
+
 
   _Piece? get _selected {
     for (final x in _pieces) {
@@ -429,12 +487,66 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
     super.dispose();
   }
 
+  Widget _segmentNavigator() {
+    final segments = _sourceSegments;
+    final ordered = _navigationPieces;
+    final currentIndex = ordered.indexWhere((x) => x.id == _activeId);
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      const SizedBox(height: 8),
+      DropdownButtonFormField<String>(
+        key: ValueKey(_segmentFilter),
+        initialValue: _segmentFilter,
+        isExpanded: true,
+        decoration: const InputDecoration(
+          labelText: 'Jump to segment / filter pieces',
+          border: OutlineInputBorder(),
+        ),
+        items: [
+          const DropdownMenuItem<String>(
+            value: null, child: Text('All segments'),
+          ),
+          for (final path in segments)
+            DropdownMenuItem<String>(
+              value: path,
+              child: Text('${_segmentLabel(path)}  '
+                  '(${_pieces.where((x) => x.path == path).length} pieces)'),
+            ),
+        ],
+        onChanged: _busy ? null : _chooseSegment,
+      ),
+      const SizedBox(height: 8),
+      Row(children: [
+        OutlinedButton.icon(
+          onPressed: _busy || currentIndex <= 0 ? null :
+              () => _jumpPiece(-1),
+          icon: const Icon(Icons.chevron_left),
+          label: const Text('Previous'),
+        ),
+        Expanded(child: Text(
+          currentIndex >= 0
+              ? '${currentIndex + 1} of ${ordered.length} pieces'
+              : 'Select a piece',
+          textAlign: TextAlign.center,
+        )),
+        OutlinedButton.icon(
+          onPressed: _busy || currentIndex < 0 ||
+              currentIndex >= ordered.length - 1 ? null :
+              () => _jumpPiece(1),
+          icon: const Icon(Icons.chevron_right),
+          label: const Text('Next'),
+        ),
+      ]),
+    ]);
+  }
+
   Widget _preview() {
     final part = _selected;
     final video = _player;
     if (part == null) return const Text('No readable segments available.');
     final position = _at.clamp(part.start, part.end).toDouble();
     return Column(children: [
+      Text(_pieceLabel(part),
+          style: Theme.of(context).textTheme.titleMedium),
       if (video != null && video.value.isInitialized)
         AspectRatio(aspectRatio: video.value.aspectRatio,
             child: VideoPlayer(video))
@@ -481,9 +593,14 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
   Widget _pieceRow(_Piece piece) => Card(
     child: Padding(padding: const EdgeInsets.all(10),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('${p.basename(piece.path)}   '
-            '${_clock(piece.start)}–${_clock(piece.end)}',
+        Text(_pieceLabel(piece),
+            style: const TextStyle(fontWeight: FontWeight.bold)),
+        Text('${_clock(piece.start)}–${_clock(piece.end)} '
+            '· ${_groups[piece.group] ?? "Recording"}',
             maxLines: 2, overflow: TextOverflow.ellipsis),
+        Text(p.basename(piece.path), maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall),
         Wrap(spacing: 6, children: [
           TextButton.icon(
             onPressed: _busy ? null : () => unawaited(_open(piece)),
@@ -531,15 +648,23 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
               const Text('Find the scramble, split at its edges, exclude '
                   'the damaged piece, then assign and reorder the surviving '
                   'pieces. Original segments are never modified.'),
+              _segmentNavigator(),
+              const SizedBox(height: 12),
               _preview(),
               if (_busy) const LinearProgressIndicator(),
               if (_notice != null) Text(_notice!),
               if (_error != null) Text(_error!,
                   style: const TextStyle(color: Colors.orangeAccent)),
               const Divider(),
-              Text('Pieces: ${_pieces.length}',
+              Text('Pieces: ${_segmentFilter == null ? _pieces.length : _pieces.where((x) => x.path == _segmentFilter).length} '
+                  'of ${_pieces.length}',
                   style: Theme.of(context).textTheme.titleMedium),
-              for (final piece in _pieces) _pieceRow(piece),
+              if (_segmentFilter != null)
+                Text('Showing ${_segmentLabel(_segmentFilter!)} only. '
+                    'Choose All segments to see every piece.'),
+              for (final piece in _pieces)
+                if (_segmentFilter == null || piece.path == _segmentFilter)
+                  _pieceRow(piece),
               const Divider(),
               Row(children: [
                 const Expanded(child: Text('Recordings',
