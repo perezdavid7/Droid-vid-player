@@ -256,7 +256,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                       ],
                     ),
                   );
-                  if (!mounted || chosen == null) return;
+                  if (!context.mounted || chosen == null) return;
                   await Navigator.push<void>(context,
                     MaterialPageRoute<void>(builder: (_) =>
                       ReconstructionEditor(segmentPaths: segments
