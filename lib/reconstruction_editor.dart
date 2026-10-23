@@ -388,9 +388,24 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
               'retained in reconstruction_work for investigation.');
         }
       }
-      await RecoveryDestination.exportToChosenFolder(merged);
-      if (mounted) { setState(() => _notice =
-          'Exported ${p.basename(merged)}. Original segments preserved.'); }
+      // Keep the private finished video on every failed or unverified export.
+      // A full read-back comparison of the chosen SAF document must succeed
+      // before removing this intermediate output.
+      if (mounted) {
+        setState(() => _notice =
+            'Exporting and checking the full destination file…');
+      }
+      await RecoveryDestination.exportVerifiedReconstruction(merged);
+      String resultMessage;
+      try {
+        await File(merged).delete();
+        resultMessage = 'Export verified. Temporary finished video deleted. '
+            'Original segments and reconstruction project preserved.';
+      } catch (error) {
+        resultMessage = 'Export verified, but the temporary app copy could '
+            'not be removed: $error. You can safely review it later.';
+      }
+      if (mounted) { setState(() => _notice = resultMessage); }
       for (final output in outputs) {
         try { await File(output).delete(); } catch (_) {}
       }
