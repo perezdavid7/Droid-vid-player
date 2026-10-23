@@ -9,6 +9,7 @@ import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
 import 'recovery_destination.dart';
 import 'raw_video_scan.dart';
+import 'reconstruction_editor.dart';
 
 class SavedRecoveriesScreen extends StatefulWidget {
   const SavedRecoveriesScreen({super.key});
@@ -234,6 +235,142 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
             Text('Files: ${paths.length} · Total: ${size(total)}'),
             const Text('No files will be deleted. A partial video may '
                 'still contain recoverable footage.'),
+            if (segmentCount > 0)
+              FilledButton.icon(
+                onPressed: busy ? null : () async {
+                  final segments = paths.where(isSegment).toList()..sort();
+                  final chosen = await showDialog<String>(
+                    context: context,
+                    builder: (ctx) => SimpleDialog(
+                      title: const Text('Select recovery run'),
+                      children: [
+                        for (final stem in segments.map((x) =>
+                            x.replaceFirst(RegExp(r'\\.segment_\\d+\\.mkv
+                label: Text('Segments only ($segmentCount)'),
+                selected: segmentsOnly,
+                onSelected: (value) =>
+                    setState(() => segmentsOnly = value),
+              ),
+            ]),
+            if (exitError != null)
+              Text(exitError!, style: const TextStyle(fontSize: 12)),
+            if (exits.isNotEmpty)
+              ExpansionTile(
+                title: const Text('Recent Android process exits'),
+                subtitle: const Text('Check why the app closed'),
+                children: [
+                  SizedBox(height: 180, child: ListView(children: [
+                    for (final item in exits.take(5))
+                      ListTile(
+                        dense: true,
+                        title: Text(exitLabel(
+                            (item['reason'] as num?)?.toInt() ?? -1)),
+                        subtitle: Text(
+                            '${DateTime.fromMillisecondsSinceEpoch((item['timestamp'] as num?)?.toInt() ?? 0).toLocal()}\n'
+                            '${item['description'] ?? ''}',
+                            maxLines: 4),
+                      ),
+                  ])),
+                ],
+              ),
+            RecoveryDestinationPicker(disabled: busy),
+            if (busy) const LinearProgressIndicator(),
+            if (message != null)
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 160),
+                child: SingleChildScrollView(child: SelectableText(message!)),
+              ),
+          ]),
+        ),
+        Expanded(child: loading
+          ? const Center(child: CircularProgressIndicator())
+          : visible.isEmpty
+            ? const Center(child: Text(
+                'No files found in the private recovery folder. '
+                'Other app data may exist elsewhere.',
+                textAlign: TextAlign.center))
+            : ListView.builder(itemCount: visible.length, itemBuilder: (context, row) {
+                final i = visible[row];
+                final path = paths[i];
+                final name = p.basename(path);
+                final incomplete = name.contains('.partial.') ||
+                    name.contains('.working.');
+                final ext = p.extension(path).toLowerCase();
+                final video = const {'.mp4', '.mkv', '.mov', '.mpg',
+                    '.mpeg', '.avi'}.contains(ext);
+                final similar = paths.where((other) =>
+                    sourceGroup(p.basename(other)) == sourceGroup(name)).length;
+                final match = RegExp(r'\.segment_(\d+)\.mkv$')
+                    .firstMatch(name);
+                final segmentNumber = match == null ? null :
+                    (int.tryParse(match.group(1) ?? '') ?? 0) + 1;
+                final checkpoint = name.endsWith('.checkpoint.txt');
+                return Card(child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    if (segmentNumber != null)
+                      Text('Segment $segmentNumber',
+                          style: const TextStyle(fontSize: 18,
+                              fontWeight: FontWeight.bold)),
+                    Text(name, maxLines: 3, overflow: TextOverflow.ellipsis),
+                    Text('${size(stats[i].size)}'
+                        '${incomplete ? ' · Incomplete/working' : ' · Saved'}'
+                        '${video ? '' : ' · Non-video'}'),
+                    if (similar > 1)
+                      Text('$similar attempts share this source name; '
+                          'not confirmed byte-for-byte duplicates.'),
+                    Wrap(spacing: 6, children: [
+                      if (checkpoint)
+                        OutlinedButton(
+                          onPressed: busy ? null : () => readCheckpoint(path),
+                          child: const Text('View checkpoint'),
+                        ),
+                      OutlinedButton(
+                        onPressed: busy || !video ? null : () => verify(path),
+                        child: const Text('Verify sample'),
+                      ),
+                      OutlinedButton(
+                        onPressed: busy || !video ? null :
+                            () => inspectBytes(path),
+                        child: const Text('Inspect bytes'),
+                      ),
+                      OutlinedButton(
+                        onPressed: busy || !video ? null :
+                            () => Navigator.of(context).pop(path),
+                        child: const Text('Play'),
+                      ),
+                      FilledButton.tonal(
+                        onPressed: busy ? null : () => export(path),
+                        child: const Text('Export'),
+                      ),
+                    ]),
+                  ]),
+                ));
+              })),
+      ]),
+    );
+  }
+}
+), ''))
+                            .toSet())
+                          SimpleDialogOption(
+                            onPressed: () => Navigator.pop(ctx, stem),
+                            child: Text('${p.basename(stem)} '
+                                '(${segments.where((x) => x.startsWith('$stem.segment_')).length} clips)'),
+                          ),
+                      ],
+                    ),
+                  );
+                  if (!mounted || chosen == null) return;
+                  await Navigator.push<void>(context,
+                    MaterialPageRoute<void>(builder: (_) =>
+                      ReconstructionEditor(segmentPaths: segments
+                          .where((x) => x.startsWith('$chosen.segment_')).toList())));
+                  if (mounted) unawaited(refresh());
+                },
+                icon: const Icon(Icons.movie_edit),
+                label: const Text('Reconstruct Recordings'),
+              ),
             Wrap(children: [
               FilterChip(
                 label: Text('Segments only ($segmentCount)'),
