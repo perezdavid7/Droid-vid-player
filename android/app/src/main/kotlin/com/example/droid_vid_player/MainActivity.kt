@@ -3,6 +3,8 @@ package com.example.droid_vid_player
 import android.app.ActivityManager
 import android.app.ApplicationExitInfo
 import android.os.Build
+import android.os.Bundle
+import java.io.File
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -28,6 +30,45 @@ import kotlin.math.abs
  * separation preserves normal playback and the timeline on codec failure.
  */
 class MainActivity : FlutterActivity() {
+    private val lastFatalReport by lazy {
+        File(filesDir, "droid_vid_last_fatal_exception.txt")
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        // Installed before the Flutter UI starts so Java/Kotlin crashes from
+        // platform callbacks or FFmpegKit can be captured before Android exits.
+        installFatalExceptionRecorder()
+        super.onCreate(savedInstanceState)
+    }
+
+    private fun installFatalExceptionRecorder() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            try {
+                val time = System.currentTimeMillis()
+                val details = buildString {
+                    append("Droid Vid Player fatal exception\\n")
+                    append("Timestamp (epoch ms): ").append(time).append('\\n')
+                    append("Thread: ").append(thread.name).append('\\n')
+                    append("Type: ").append(error.javaClass.name).append('\\n')
+                    append("Message: ").append(error.message ?: "(none)").append('\\n')
+                    append("Stack trace:\\n")
+                    append(error.stackTraceToString())
+                }
+                lastFatalReport.writeText(details.take(32000))
+            } catch (_: Throwable) {
+                // Diagnostic collection must never suppress the system's
+                // original crash handling, even when device storage is full.
+            } finally {
+                if (previous != null) {
+                    previous.uncaughtException(thread, error)
+                } else {
+                    android.os.Process.killProcess(android.os.Process.myPid())
+                }
+            }
+        }
+    }
+
     private val ui = Handler(android.os.Looper.getMainLooper())
     private val decodeThread = HandlerThread("DroidScrubHardware")
     private lateinit var decode: Handler
@@ -66,7 +107,17 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             "droid_vid_player/diagnostics"
         ).setMethodCallHandler { call, result ->
-            if (call.method != "recentProcessExits") {
+            if (call.method == "lastFatalException") {
+                try {
+                    result.success(
+                        if (lastFatalReport.exists()) {
+                            lastFatalReport.readText().take(32000)
+                        } else null
+                    )
+                } catch (error: Exception) {
+                    result.error("FATAL_REPORT_READ_FAILED", error.message, null)
+                }
+            } else if (call.method != "recentProcessExits") {
                 result.notImplemented()
             } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
                 result.success(emptyList<Map<String, Any?>>())
