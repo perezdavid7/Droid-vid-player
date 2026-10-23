@@ -26,6 +26,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   bool segmentsOnly = false;
   List<Map<String, dynamic>> exits = [];
   String? exitError;
+  String? lastFatalException;
 
   @override
   void initState() {
@@ -76,11 +77,13 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
       const channel = MethodChannel('droid_vid_player/diagnostics');
       final result = await channel.invokeListMethod<dynamic>(
           'recentProcessExits');
+      final fatal = await channel.invokeMethod<String>('lastFatalException');
       if (!mounted) { return; }
       setState(() {
         exits = (result ?? const []).whereType<Map>().map((value) =>
             Map<String, dynamic>.from(value)).toList();
         exitError = null;
+        lastFatalException = fatal;
       });
     } catch (e) {
       if (mounted) {
@@ -276,6 +279,17 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
             ]),
             if (exitError != null)
               Text(exitError!, style: const TextStyle(fontSize: 12)),
+            if (lastFatalException != null &&
+                lastFatalException!.isNotEmpty)
+              ExpansionTile(
+                title: const Text('Last fatal exception details'),
+                subtitle: const Text('Crash trace captured on the device'),
+                children: [
+                  SizedBox(height: 250, child: SingleChildScrollView(
+                    child: SelectableText(lastFatalException!),
+                  )),
+                ],
+              ),
             if (exits.isNotEmpty)
               ExpansionTile(
                 title: const Text('Recent Android process exits'),
