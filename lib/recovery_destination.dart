@@ -85,6 +85,62 @@ class RecoveryDestination {
     return await selectedLabel();
   }
 
+  /// Copies a reconstructed video to the user's SAF folder and reads it back
+  /// byte-for-byte before permitting its app-private output to be removed.
+  /// This does not delete anything. When verification cannot finish, callers
+  /// MUST retain their private local output for a safe retry.
+  static Future<String> exportVerifiedReconstruction(String localPath) async {
+    final localFile = File(localPath);
+    final expectedBytes = await localFile.length();
+    if (expectedBytes < 4096) {
+      throw StateError('Reconstruction output is too small to export safely.');
+    }
+    final exportedUri = await exportToChosenFolder(localPath);
+    if (exportedUri == null || exportedUri.isEmpty) {
+      throw StateError('Choose an output folder before exporting.');
+    }
+
+    final remote = await _saf.stat(exportedUri);
+    if (remote == null || remote.isDir || remote.length != expectedBytes) {
+      throw StateError('The exported file could not be verified at the '
+          'destination. The local reconstructed video has been retained.');
+    }
+
+    // Read the destination in bounded chunks; never create another copy or
+    // load a multi-gigabyte recovery into memory. Comparing the whole file
+    // catches silent truncation and byte differences before local deletion.
+    final local = await localFile.open(mode: FileMode.read);
+    var checked = 0;
+    try {
+      final stream = await _saf.readFileStream(
+        exportedUri, bufferSize: 1024 * 1024);
+      await for (final remoteBytes in stream) {
+        if (remoteBytes.isEmpty) continue;
+        final localBytes = await local.read(remoteBytes.length);
+        if (localBytes.length != remoteBytes.length ||
+            checked + remoteBytes.length > expectedBytes) {
+          throw StateError('Export verification failed: file length changed. '
+              'The local reconstructed video has been retained.');
+        }
+        for (var i = 0; i < remoteBytes.length; i++) {
+          if (remoteBytes[i] != localBytes[i]) {
+            throw StateError('Export verification found different video '
+                'bytes. The local reconstructed video has been retained.');
+          }
+        }
+        checked += remoteBytes.length;
+      }
+      if (checked != expectedBytes) {
+        throw StateError('Export verification was incomplete '
+            '($checked of $expectedBytes bytes). '
+            'The local reconstructed video has been retained.');
+      }
+    } finally {
+      await local.close();
+    }
+    return exportedUri;
+  }
+
   static Future<String?> exportToChosenFolder(String localPath) async {
     final uri = await selectedUri();
     if (uri == null || uri.isEmpty) return null;
