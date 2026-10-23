@@ -26,7 +26,7 @@ class _Piece {
     if (value is! Map) return null;
     if (value['id'] is! int || value['path'] is! String ||
         value['start'] is! int || value['end'] is! int ||
-        value['group'] is! int) return null;
+        value['group'] is! int) { return null; }
     return _Piece(value['id'] as int, value['path'] as String,
         value['start'] as int, value['end'] as int, value['group'] as int,
         excluded: value['excluded'] == true);
@@ -160,10 +160,10 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
       if (mounted) setState(() => _loading = false);
       if (_pieces.isNotEmpty) await _open(_pieces.first);
     } catch (error) {
-      if (mounted) setState(() {
+      if (mounted) { setState(() {
         _loading = false;
         _error = '$error';
-      });
+      }); }
     }
   }
 
@@ -308,8 +308,8 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
     if (pieces.isEmpty) return;
     final destination = await RecoveryDestination.selectedUri();
     if (destination == null || destination.isEmpty) {
-      if (mounted) setState(() => _error =
-          'Choose an export folder in Saved Recoveries first.');
+      if (mounted) { setState(() => _error =
+          'Choose an export folder in Saved Recoveries first.'); }
       return;
     }
     if (!mounted) return;
@@ -345,8 +345,8 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
       for (var i = 0; i < pieces.length; i++) {
         final part = pieces[i];
         final output = p.join(scratch.path, '${job}_piece_$i.mkv');
-        if (mounted) setState(() =>
-            _notice = 'Encoding piece ${i + 1} / ${pieces.length}…');
+        if (mounted) { setState(() =>
+            _notice = 'Encoding piece ${i + 1} / ${pieces.length}…'); }
         final ok = await _run([
           '-hide_banner', '-nostdin', '-loglevel', 'error',
           '-threads', '2', '-i', part.path,
@@ -389,8 +389,8 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
         }
       }
       await RecoveryDestination.exportToChosenFolder(merged);
-      if (mounted) setState(() => _notice =
-          'Exported ${p.basename(merged)}. Original segments preserved.');
+      if (mounted) { setState(() => _notice =
+          'Exported ${p.basename(merged)}. Original segments preserved.'); }
       for (final output in outputs) {
         try { await File(output).delete(); } catch (_) {}
       }
