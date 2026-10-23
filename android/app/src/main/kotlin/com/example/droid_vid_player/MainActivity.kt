@@ -47,12 +47,12 @@ class MainActivity : FlutterActivity() {
             try {
                 val time = System.currentTimeMillis()
                 val details = buildString {
-                    append("Droid Vid Player fatal exception\\n")
-                    append("Timestamp (epoch ms): ").append(time).append('\\n')
-                    append("Thread: ").append(thread.name).append('\\n')
-                    append("Type: ").append(error.javaClass.name).append('\\n')
-                    append("Message: ").append(error.message ?: "(none)").append('\\n')
-                    append("Stack trace:\\n")
+                    append("Droid Vid Player fatal exception\n")
+                    append("Timestamp (epoch ms): ").append(time).append('\n')
+                    append("Thread: ").append(thread.name).append('\n')
+                    append("Type: ").append(error.javaClass.name).append('\n')
+                    append("Message: ").append(error.message ?: "(none)").append('\n')
+                    append("Stack trace:\n")
                     append(error.stackTraceToString())
                 }
                 lastFatalReport.writeText(details.take(32000))
