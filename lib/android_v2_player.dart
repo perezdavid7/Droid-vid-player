@@ -827,7 +827,10 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     if (!mounted) return;
     final pick = await Navigator.of(context).push<SavedRecoveryPick>(
       MaterialPageRoute<SavedRecoveryPick>(
-        builder: (_) => SavedRecoveriesScreen(initialTab: _savedRecoveryTab),
+        builder: (_) => SavedRecoveriesScreen(
+          initialTab: _savedRecoveryTab,
+          onTabChanged: (tab) => _savedRecoveryTab = tab,
+        ),
       ),
     );
     if (!mounted || pick == null || !await File(pick.path).exists()) return;

@@ -12,6 +12,7 @@ import 'raw_video_scan.dart';
 import 'reconstruction_editor.dart';
 
 enum RecoveryListTab { all, segments, otherVideos, reports }
+enum _RecoverySort { recoveryOrder, newest, oldest, largest, smallest }
 
 /// Returning the selected tab with the video prevents Saved Recoveries from
 /// silently switching back to All when the player is closed.
@@ -26,8 +27,10 @@ enum _FileAction { play, verify, inspect, export, readReport, delete }
 class SavedRecoveriesScreen extends StatefulWidget {
   const SavedRecoveriesScreen({
     super.key, this.initialTab = RecoveryListTab.all,
+    this.onTabChanged,
   });
   final RecoveryListTab initialTab;
+  final ValueChanged<RecoveryListTab>? onTabChanged;
   @override
   State<SavedRecoveriesScreen> createState() => _SavedRecoveriesScreenState();
 }
@@ -41,6 +44,13 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   String? _exportTarget;
   String? message;
   late RecoveryListTab _view;
+  // Shared across library route reopens: opening a video never loses sorting.
+  static final Map<RecoveryListTab, _RecoverySort> _sortByTab = {
+    RecoveryListTab.all: _RecoverySort.newest,
+    RecoveryListTab.segments: _RecoverySort.recoveryOrder,
+    RecoveryListTab.otherVideos: _RecoverySort.newest,
+    RecoveryListTab.reports: _RecoverySort.newest,
+  };
   bool _selecting = false;
   final Set<String> _selectedPaths = {};
   List<Map<String, dynamic>> exits = [];
@@ -541,6 +551,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     setState(() {
       _view = next;
       _selectedPaths.clear();
+      widget.onTabChanged?.call(next);
     });
   }
 
@@ -693,16 +704,27 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
             case RecoveryListTab.reports: return !isVideoFile(path);
           }
         }).toList();
-    if (_view == RecoveryListTab.segments) {
-      visible.sort((a, b) {
-        final order = (runNumbers[segmentRun(paths[b])] ?? 0)
-            .compareTo(runNumbers[segmentRun(paths[a])] ?? 0);
-        return order != 0 ? order :
-            segmentOrdinal(paths[a]).compareTo(segmentOrdinal(paths[b]));
-      });
-    } else {
-      visible.sort((a, b) => stats[b].modified.compareTo(stats[a].modified));
-    }
+    final sort = _sortByTab[_view] ?? _RecoverySort.newest;
+    visible.sort((a, b) {
+      int order;
+      switch (sort) {
+        case _RecoverySort.recoveryOrder:
+          order = (runNumbers[segmentRun(paths[b])] ?? 0)
+              .compareTo(runNumbers[segmentRun(paths[a])] ?? 0);
+          if (order == 0) {
+            order = segmentOrdinal(paths[a]).compareTo(segmentOrdinal(paths[b]));
+          }
+        case _RecoverySort.newest:
+          order = stats[b].modified.compareTo(stats[a].modified);
+        case _RecoverySort.oldest:
+          order = stats[a].modified.compareTo(stats[b].modified);
+        case _RecoverySort.largest:
+          order = stats[b].size.compareTo(stats[a].size);
+        case _RecoverySort.smallest:
+          order = stats[a].size.compareTo(stats[b].size);
+      }
+      return order != 0 ? order : paths[a].compareTo(paths[b]);
+    });
     return Scaffold(
       appBar: AppBar(
         title: const Text('Saved Recoveries'),
@@ -801,6 +823,35 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                     ),
                   ]),
                 ),
+                Row(children: [
+                  const Icon(Icons.sort, size: 20),
+                  const SizedBox(width: 8),
+                  const Text('Sort by'),
+                  const SizedBox(width: 12),
+                  Expanded(child: DropdownButton<_RecoverySort>(
+                    isExpanded: true,
+                    value: sort,
+                    items: [
+                      if (_view == RecoveryListTab.segments)
+                        const DropdownMenuItem(
+                          value: _RecoverySort.recoveryOrder,
+                          child: Text('Recovery run / segment order')),
+                      const DropdownMenuItem(
+                        value: _RecoverySort.newest, child: Text('Newest first')),
+                      const DropdownMenuItem(
+                        value: _RecoverySort.oldest, child: Text('Oldest first')),
+                      const DropdownMenuItem(
+                        value: _RecoverySort.largest, child: Text('Largest first')),
+                      const DropdownMenuItem(
+                        value: _RecoverySort.smallest, child: Text('Smallest first')),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setState(() => _sortByTab[_view] = value);
+                      }
+                    },
+                  )),
+                ]),
                 if (busy) const LinearProgressIndicator(),
                 if (message != null)
                   ExpansionTile(
@@ -860,7 +911,8 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
               final run = segment ? segmentRun(path) : null;
               final number = segmentOrdinal(path) + 1;
               final runNumber = run == null ? null : runNumbers[run];
-              final header = segment && _view == RecoveryListTab.segments &&
+              final header = sort == _RecoverySort.recoveryOrder &&
+                   segment && _view == RecoveryListTab.segments &&
                   (index == 0 ||
                     segmentRun(paths[visible[index - 1]]) != run);
               final fileIsCheckpoint = name.endsWith('.checkpoint.txt');
@@ -895,6 +947,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(fontWeight: FontWeight.w600)),
                             Text('${size(stats[fileIndex].size)}'
+                                ' · ${stats[fileIndex].modified.toLocal().toString().substring(0, 16)}'
                                 ' · ${segment ? "Recovered segment" :
                                   video ? "Video" : "Report"}',
                                 style: Theme.of(context).textTheme.bodySmall),
