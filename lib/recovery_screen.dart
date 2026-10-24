@@ -197,9 +197,11 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   Future<void> _runFullRecovery() async {
     if (!{'.mpg', '.mpeg', '.vob'}.contains(
         p.extension(widget.sourcePath).toLowerCase())) {
-      if (mounted) setState(() => _error =
-          'Full-file byte recovery currently supports MPEG program streams '
-          '(.mpg, .mpeg, .vob). Other formats need their own scanners.');
+      if (mounted) {
+        setState(() => _error =
+            'Full-file byte recovery currently supports MPEG program streams '
+            '(.mpg, .mpeg, .vob). Other formats need their own scanners.');
+      }
       return;
     }
     final generation = ++_generation;
@@ -299,11 +301,13 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             }
           }
 
-          if (mounted) setState(() {
+          if (mounted) {
+            setState(() {
             _fullJobStatus[i] = 'Copying isolated source bytes';
             _status = 'Job ${i + 1}/${regions.length} ($label): '
                 'preparing an isolated input. Original is untouched.';
-          });
+            });
+          }
           await MpegFullScan.copyByteRange(
             source, temporary, region.startByte, region.endByte,
             isCancelled: () => _cancelScan,
@@ -319,11 +323,13 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           _processed = Duration.zero;
           _segmentTimer = Timer.periodic(const Duration(seconds: 3),
               (_) => unawaited(_checkSegments()));
-          if (mounted) setState(() {
+          if (mounted) {
+            setState(() {
             _fullJobStatus[i] = 'Recovering video into MKV segments';
             _status = 'Job ${i + 1}/${regions.length} ($label): '
                 'recovering into separate 90-second clips.';
-          });
+            });
+          }
 
           final finished = Completer<FFmpegSession>();
           final args = RecoverySegments.args(
@@ -391,23 +397,27 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           if (_resultPath == null && verified.isNotEmpty) {
             _resultPath = verified.first;
           }
-          if (mounted) setState(() {
+          if (mounted) {
+            setState(() {
             _fullJobStatus[i] =
                 '${verified.length} verified / ${clips.length} clips';
             _status = 'Finished job ${i + 1}/${regions.length}. '
                 'Continuing through remaining sections…';
-          });
+            });
+          }
         } on MpegScanCancelled {
           rethrow;
         } catch (e) {
           // A failed region is not a reason to give up on later sections.
-          if (mounted) setState(() {
+          if (mounted) {
+            setState(() {
             if (!_fullJobStatus[i].startsWith('Paused')) {
               _fullJobStatus[i] = 'Failed — $e';
             }
             _status = 'Job ${i + 1}/${regions.length} failed; '
                 'continuing with the next region.';
-          });
+            });
+          }
         } finally {
           _stopSegmentTimer();
           _sessionId = null;
@@ -416,21 +426,27 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           } catch (_) {}
         }
       }
-      if (mounted) setState(() {
+      if (mounted) {
+        setState(() {
         _status = 'Full 0–100% scan and queue finished: '
             '$completed / ${regions.length} jobs processed, '
             '$_fullVerifiedSegments locally verified video clips. '
             'Find every saved clip under Saved Recoveries → Segments.';
-      });
+        });
+      }
     } on MpegScanCancelled {
-      if (mounted) setState(() {
+      if (mounted) {
+        setState(() {
         _status = 'Full-file recovery stopped. Already saved segments remain.';
-      });
+        });
+      }
     } catch (e) {
-      if (mounted) setState(() {
+      if (mounted) {
+        setState(() {
         _error = 'Full-file recovery stopped: $e';
         _status = 'Recovery was interrupted; existing clips were preserved.';
-      });
+        });
+      }
     } finally {
       _stopSegmentTimer();
       _sessionId = null;
