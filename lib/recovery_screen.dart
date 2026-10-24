@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'recovery_segments.dart';
 import 'mpeg_recovery_jump.dart';
+import 'mpeg_auto_recovery.dart';
 import 'raw_video_scan.dart';
 import 'file_identification.dart';
 
@@ -15,7 +16,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-enum RecoveryMode { quickRepair, deepHighQuality, pastCrash, advancedAnalysis }
+enum RecoveryMode { quickRepair, deepHighQuality, pastCrash, autoRegions, advancedAnalysis }
 
 /// Experimental forward-only repair or decode -> re-encode recovery. Never seeks, records
 /// only decoded media streams (not player UI), and never touches the original.
@@ -35,6 +36,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   FileIdentification? _identification;
   double _scanProgress = 0;
   bool _cancelScan = false;
+  bool _autoScanning = false;
+  int _autoRegionTotal = 0;
+  int _autoRegionDone = 0;
+  int _autoSegments = 0;
   bool _running = false;
   bool _cancelling = false;
   bool _savingGallery = false;
@@ -193,6 +198,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     if (!await File(widget.sourcePath).exists()) {
       setState(() => _error = 'The selected file is no longer accessible. '
           'Reopen it with the file picker before retrying.');
+      return;
+    }
+    if (_mode == RecoveryMode.autoRegions) {
+      await _startAutoRegions();
       return;
     }
     if ((_mode == RecoveryMode.deepHighQuality || _mode == RecoveryMode.pastCrash) && Platform.isAndroid) {
@@ -476,14 +485,177 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     }
   }
 
+
+  Future<void> _startAutoRegions() async {
+    if (_running || _savingGallery) return;
+    if (!{'.mpg', '.mpeg', '.vob'}.contains(
+        p.extension(widget.sourcePath).toLowerCase())) {
+      setState(() => _error = 'Whole-file byte recovery currently supports '
+          'MPEG program streams (.mpg, .mpeg, .vob).');
+      return;
+    }
+    final generation = ++_generation;
+    setState(() {
+      _running = true;
+      _cancelling = false;
+      _cancelScan = false;
+      _autoScanning = true;
+      _scanProgress = 0;
+      _autoRegionTotal = 0;
+      _autoRegionDone = 0;
+      _autoSegments = 0;
+      _error = null;
+      _diagnostic = null;
+      _resultPath = null;
+      _logPath = null;
+      _status = 'Scanning 0% to 100% of the source bytes…';
+    });
+    try {
+      await _wake(true);
+      final regions = await MpegRecoveryJump.scanEntireFile(
+        widget.sourcePath,
+        isCancelled: () => _cancelScan || generation != _generation,
+        onProgress: (fraction, message) {
+          if (mounted && generation == _generation) {
+            setState(() {
+              _scanProgress = fraction;
+              _status = message;
+            });
+          }
+        },
+      );
+      if (!mounted || generation != _generation) return;
+      if (_cancelScan) {
+        setState(() => _status = 'Whole-file scan cancelled.');
+        return;
+      }
+      setState(() {
+        _autoScanning = false;
+        _autoRegionTotal = regions.length;
+      });
+      if (regions.isEmpty) {
+        setState(() => _status = 'Checked 0–100%: no decodable MPEG video '
+            'samples were confirmed. No recovery files were made.');
+        return;
+      }
+      final documents = await getApplicationDocumentsDirectory();
+      final directory = Directory(p.join(documents.path, 'DroidVidRecoveries'));
+      await directory.create(recursive: true);
+      final rawName = p.basenameWithoutExtension(widget.sourcePath)
+          .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+      final cleanName = rawName.isEmpty ? 'video' :
+          (rawName.length > 40 ? rawName.substring(0, 40) : rawName);
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final report = File(p.join(directory.path,
+          '${cleanName}_autoscan_$timestamp.checkpoint.txt'));
+      await report.writeAsString(
+        'Automatic full-file MPEG recovery scan\n'
+        'Source: ${widget.sourcePath}\n'
+        'Sampled every 1% of bytes, across 0–100%.\n'
+        'Candidate regions: ${regions.length}\n'
+        'Note: boundaries are approximate; verify every recovered clip.\n\n',
+        flush: true,
+      );
+      var saved = 0;
+      var errors = 0;
+      for (var i = 0; i < regions.length; i++) {
+        if (_cancelScan || !mounted || generation != _generation) break;
+        final region = regions[i];
+        setState(() => _status = 'Recovering region ${i + 1}/'
+            '${regions.length}, bytes ${region.fromPercent}%–'
+            '${region.throughPercent}%…');
+        try {
+          if (Platform.isAndroid) {
+            const channel = MethodChannel('droid_vid_player/storage');
+            final free = await channel.invokeMethod<int>('availableBytes');
+            final needed = region.length + region.length ~/ 2 +
+                512 * 1024 * 1024;
+            if (free == null || free < needed) {
+              throw StateError('Not enough storage for temporary region '
+                  'and output; need about '
+                  '${(needed / 1073741824).toStringAsFixed(1)} GB free.');
+            }
+          }
+          final stem = '${cleanName}_autoscan_region'
+              '${(i + 1).toString().padLeft(3, "0")}_$timestamp';
+          final result = await MpegAutoRecovery.recoverRegion(
+            sourcePath: widget.sourcePath,
+            region: region,
+            directory: directory.path,
+            stem: stem,
+            isCancelled: () => _cancelScan || generation != _generation,
+            onSession: (id) => _sessionId = id,
+            onProgress: (message) {
+              if (mounted && generation == _generation) {
+                setState(() => _status =
+                    'Region ${i + 1}/${regions.length}: $message');
+              }
+            },
+          );
+          saved += result.segments;
+          if (!result.completed) errors++;
+          await report.writeAsString(
+            'Region ${i + 1} (${region.fromPercent}%–'
+            '${region.throughPercent}%): '
+            '${result.segments} segments; completed: ${result.completed}\n',
+            mode: FileMode.append, flush: true,
+          );
+        } catch (error) {
+          errors++;
+          await report.writeAsString(
+            'Region ${i + 1} error: $error\n',
+            mode: FileMode.append, flush: true,
+          );
+        }
+        if (mounted && generation == _generation) {
+          setState(() {
+            _autoRegionDone = i + 1;
+            _autoSegments = saved;
+          });
+        }
+      }
+      if (!mounted || generation != _generation) return;
+      setState(() {
+        _logPath = report.path;
+        _status = _cancelScan
+            ? 'Stopped. $saved segment files already saved; '
+              'check Saved Recoveries → Segments.'
+            : 'Scanned 0–100%. ${regions.length} candidate regions, '
+              '$saved segments produced ($errors incomplete jobs). '
+              'Open Saved Recoveries → Segments to review.';
+      });
+    } catch (error) {
+      if (mounted && generation == _generation) {
+        setState(() {
+          _status = 'Automatic recovery stopped.';
+          _error = '$error';
+        });
+      }
+    } finally {
+      await _wake(false);
+      if (mounted && generation == _generation) {
+        setState(() {
+          _running = false;
+          _cancelling = false;
+          _autoScanning = false;
+          _sessionId = null;
+        });
+      }
+    }
+  }
+
   Future<void> _cancel() async {
     if (!_running || _cancelling) return;
-    if (_mode == RecoveryMode.advancedAnalysis) {
+    if (_mode == RecoveryMode.advancedAnalysis ||
+        _mode == RecoveryMode.autoRegions) {
       setState(() {
         _cancelScan = true;
         _cancelling = true;
-        _status = 'Stopping analysis…';
+        _status = _mode == RecoveryMode.advancedAnalysis
+            ? 'Stopping analysis…' : 'Stopping automatic recovery…';
       });
+      final id = _sessionId;
+      if (id != null) await FFmpegKit.cancel(id);
       return;
     }
     setState(() {
@@ -580,6 +752,12 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                     child: Text('Recover Past Crash — MPEG byte jump'),
                   ),
                   DropdownMenuItem(
+                    value: RecoveryMode.autoRegions,
+                    child: Text('Automatic 0–100% MPEG scan'),
+
+                  ),
+
+                  DropdownMenuItem(
                     value: RecoveryMode.advancedAnalysis,
                     child: Text('Advanced Analysis — unknown source'),
                   ),
@@ -597,7 +775,13 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                             ? 'Starts at a later position in the MPEG file '
                               'to bypass the repeatedly crashing region. '
                               'Creates fresh, separate segments.'
-                            : 'Scans MP4 box markers and potential raw H.264/H.265 '
+                            : _mode == RecoveryMode.autoRegions
+                                ? 'Tests MPEG video at every 1% byte position '
+                                  'from the beginning to the end, groups '
+                                  'playable positions and recovers bounded '
+                                  'regions as separate jobs. Probe results '
+                                  'cannot guarantee every frame is playable.'
+                                : 'Scans MP4 box markers and potential raw H.264/H.265 '
                           'headers without loading the full video in memory. '
                           'Analysis does not reconstruct a missing MP4 index, '
                           'and detected byte signatures do not guarantee '
@@ -633,13 +817,18 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               Text(_status, style: const TextStyle(fontSize: 16)),
               if (_running) ...[
                 const SizedBox(height: 12),
-                _mode == RecoveryMode.advancedAnalysis
+                (_mode == RecoveryMode.advancedAnalysis ||
+                     (_mode == RecoveryMode.autoRegions && _autoScanning))
                     ? LinearProgressIndicator(value: _scanProgress)
                     : const LinearProgressIndicator(),
                 const SizedBox(height: 8),
-                if (_mode == RecoveryMode.advancedAnalysis)
-                  Text('Analyzed: ${(_scanProgress * 100).toStringAsFixed(0)}%')
-                else ...[
+                if (_mode == RecoveryMode.advancedAnalysis ||
+                    (_mode == RecoveryMode.autoRegions && _autoScanning))
+                  Text('Checked: ${(_scanProgress * 100).toStringAsFixed(0)}%')
+                else if (_mode == RecoveryMode.autoRegions) ...[
+                  Text('Recovery tasks: $_autoRegionDone/$_autoRegionTotal'),
+                  Text('Segment files produced: $_autoSegments'),
+                ] else ...[
                   Text('Processed output time: ${_duration(_processed)}'
                        '  ·  Frames: $_frames'),
                   if (_mode == RecoveryMode.deepHighQuality ||
@@ -715,7 +904,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                           ? 'Start High-Quality Deep Recovery'
                           : _mode == RecoveryMode.pastCrash
                               ? 'Recover Past Crash'
-                              : 'Analyze File Structure'),
+                              : _mode == RecoveryMode.autoRegions
+                                   ? 'Scan 0–100% and Recover'
+                                   : 'Analyze File Structure'),
                 ),
               if (_running)
                 OutlinedButton.icon(
