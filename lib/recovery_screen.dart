@@ -218,6 +218,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       }
     }
     MpegJumpResult? byteJump;
+    String? detectedVideoStream;
     if (_mode == RecoveryMode.pastCrash) {
       if (!{'.mpg', '.mpeg', '.vob'}.contains(
           p.extension(widget.sourcePath).toLowerCase())) {
@@ -228,8 +229,15 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         return;
       }
       try {
-        byteJump = await MpegRecoveryJump.locate(widget.sourcePath,
-            percent: _jumpPercent);
+        final detected = await MpegRecoveryJump.findDecodableStart(
+          widget.sourcePath,
+          percent: _jumpPercent,
+          onProgress: (status) {
+            if (mounted) setState(() => _status = status);
+          },
+        );
+        byteJump = detected.jump;
+        detectedVideoStream = detected.stream;
       } catch (error) {
         if (mounted) {
           setState(() => _error = '$error');
@@ -257,7 +265,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       _latestSegment = null;
       _status = _mode == RecoveryMode.quickRepair
           ? 'Quick Repair: rebuilding the container without re-encoding…'
-          : 'Deep Recovery: decoding and rebuilding at high quality…';
+          : _mode == RecoveryMode.pastCrash
+              ? 'Past-crash recovery: validated video stream, '
+                'encoding later footage…'
+              : 'Deep Recovery: decoding and rebuilding at high quality…';
     });
     try {
       final documents = await getApplicationDocumentsDirectory();
@@ -311,7 +322,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           '-skip_initial_bytes', '${byteJump.alignedByte}', '-f', 'mpeg',
         ],
         '-i', widget.sourcePath,
-        '-map', '0:v:0', '-map', '0:a:0?',
+        '-map', detectedVideoStream ?? '0:v:0',
+        if (detectedVideoStream == null) ...['-map', '0:a:0?'],
         '-sn', '-dn',
       ];
       // MPEG program streams can contain resolution changes, damaged GOPs,
