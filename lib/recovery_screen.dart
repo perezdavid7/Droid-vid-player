@@ -560,6 +560,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                     child: Text('Deep Recovery — high quality'),
                   ),
                   DropdownMenuItem(
+                    value: RecoveryMode.pastCrash,
+                    child: Text('Recover Past Crash — MPEG byte jump'),
+                  ),
+                  DropdownMenuItem(
                     value: RecoveryMode.advancedAnalysis,
                     child: Text('Advanced Analysis — unknown source'),
                   ),
@@ -573,12 +577,34 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                     : _mode == RecoveryMode.deepHighQuality
                         ? 'Decodes frames and audio into 90-second MKV segments. Requires '
                           'FFmpeg to recognize the input container.'
-                        : 'Scans MP4 box markers and potential raw H.264/H.265 '
+                        : _mode == RecoveryMode.pastCrash
+                            ? 'Starts at a later position in the MPEG file '
+                              'to bypass the repeatedly crashing region. '
+                              'Creates fresh, separate segments.'
+                            : 'Scans MP4 box markers and potential raw H.264/H.265 '
                           'headers without loading the full video in memory. '
                           'Analysis does not reconstruct a missing MP4 index, '
                           'and detected byte signatures do not guarantee '
                           'recoverable video.',
               ),
+              if (_mode == RecoveryMode.pastCrash) ...[
+                const SizedBox(height: 8),
+                Text('Begin beyond $_jumpPercent% of source bytes'),
+                Slider(
+                  value: _jumpPercent.toDouble(),
+                  min: 10, max: 90, divisions: 16,
+                  label: '$_jumpPercent%',
+                  onChanged: locked ? null :
+                      (value) => setState(() => _jumpPercent = value.round()),
+                ),
+                const Text('Try 30% first. If that crashes, try 50% or 70%. '
+                    'This is a byte position, not an exact timestamp. '
+                    'Earlier recovery clips will not be overwritten.',
+                    style: TextStyle(fontSize: 12)),
+                if (_lastJump != null)
+                  Text('Byte start: ${_lastJump!.alignedByte} / '
+                      '${_lastJump!.sourceBytes}'),
+              ],
               const SizedBox(height: 12),
               RecoveryDestinationPicker(disabled: locked),
               const SizedBox(height: 14),
@@ -671,7 +697,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                       ? 'Start Quick Repair'
                       : _mode == RecoveryMode.deepHighQuality
                           ? 'Start High-Quality Deep Recovery'
-                          : 'Analyze File Structure'),
+                          : _mode == RecoveryMode.pastCrash
+                              ? 'Recover Past Crash'
+                              : 'Analyze File Structure'),
                 ),
               if (_running)
                 OutlinedButton.icon(
