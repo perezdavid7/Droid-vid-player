@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 import 'recovery_segments.dart';
 import 'mpeg_recovery_jump.dart';
+import 'mpeg_full_scan.dart';
 import 'raw_video_scan.dart';
 import 'file_identification.dart';
 
@@ -49,6 +50,13 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   int _generation = 0;
   int _frames = 0;
   int _jumpPercent = 30;
+  bool _fullScan = true;
+  double _fullByteProgress = 0;
+  int _fullProbeDone = 0;
+  int _fullProbeTotal = 0;
+  List<MpegRecoveryRegion> _fullRegions = [];
+  List<String> _fullJobStatus = [];
+  int _fullVerifiedSegments = 0;
   MpegJumpResult? _lastJump;
   String? _diagnostic;
   Duration _processed = Duration.zero;
@@ -184,6 +192,259 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
 
   DateTime _lastRecoveryPaint = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// Analyze all source bytes and recover every independently verified region.
+  /// Jobs are isolated by a temporary BYTE slice, rather than corrupt PTS.
+  Future<void> _runFullRecovery() async {
+    if (!{'.mpg', '.mpeg', '.vob'}.contains(
+        p.extension(widget.sourcePath).toLowerCase())) {
+      if (mounted) setState(() => _error =
+          'Full-file byte recovery currently supports MPEG program streams '
+          '(.mpg, .mpeg, .vob). Other formats need their own scanners.');
+      return;
+    }
+    final generation = ++_generation;
+    setState(() {
+      _running = true;
+      _cancelling = false;
+      _cancelScan = false;
+      _gallerySaved = false;
+      _resultPath = null;
+      _error = null;
+      _diagnostic = null;
+      _fullByteProgress = 0;
+      _fullProbeDone = 0;
+      _fullProbeTotal = 0;
+      _fullRegions = [];
+      _fullJobStatus = [];
+      _fullVerifiedSegments = 0;
+      _status = 'Scanning all source bytes from 0% to 100%…';
+    });
+    try {
+      await _wake(true);
+      final regions = await MpegFullScan.scan(
+        widget.sourcePath,
+        isCancelled: () => _cancelScan || generation != _generation,
+        onByteProgress: (fraction) {
+          if (!mounted || generation != _generation) return;
+          if (fraction - _fullByteProgress >= 0.01 || fraction >= 1) {
+            setState(() {
+              _fullByteProgress = fraction;
+              _status = 'Scanning every source byte: '
+                  '${(fraction * 100).toStringAsFixed(0)}%. '
+                  'Next: independently test video in candidate sections.';
+            });
+          }
+        },
+        onProbeProgress: (done, total) {
+          if (!mounted || generation != _generation) return;
+          setState(() {
+            _fullProbeDone = done;
+            _fullProbeTotal = total;
+            _status = 'Entire source scanned (100%). '
+                'Testing local video in candidate sections: $done / $total. '
+                'A failed section does not stop the scan.';
+          });
+        },
+      );
+      if (_cancelScan || generation != _generation) {
+        throw const MpegScanCancelled();
+      }
+      if (!mounted) return;
+      setState(() {
+        _fullRegions = regions;
+        _fullJobStatus = List<String>.filled(
+            regions.length, 'Waiting to recover');
+        _status = regions.isEmpty
+            ? 'Inspected 100% of source bytes; no locally decodable '
+              'MPEG video sections were found.'
+            : 'Full 0–100% scan complete. Found ${regions.length} '
+              'separate recovery jobs; processing them one at a time.';
+      });
+      if (regions.isEmpty) return;
+
+      final directory = Directory(p.join(
+          (await getApplicationDocumentsDirectory()).path,
+          'DroidVidRecoveries'));
+      await directory.create(recursive: true);
+      final tempDirectory = await getTemporaryDirectory();
+      final cleanBase = p.basenameWithoutExtension(widget.sourcePath)
+          .replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+      final baseName = cleanBase.isEmpty ? 'video' :
+          (cleanBase.length > 36 ? cleanBase.substring(0, 36) : cleanBase);
+      final source = File(widget.sourcePath);
+      var completed = 0;
+
+      for (var i = 0; i < regions.length; i++) {
+        if (_cancelScan) throw const MpegScanCancelled();
+        final region = regions[i];
+        final label = '${region.startPercent.toStringAsFixed(1)}–'
+            '${region.endPercent.toStringAsFixed(1)}%';
+        final stem = '${baseName}_fullscan_job'
+            '${(i + 1).toString().padLeft(3, "0")}'
+            '_${DateTime.now().millisecondsSinceEpoch}';
+        final temporary = File(p.join(tempDirectory.path, '$stem.input.mpg'));
+        final pattern = p.join(directory.path, '$stem.segment_%05d.mkv');
+        final logFile = File(p.join(directory.path, '$stem.log.txt'));
+        try {
+          if (Platform.isAndroid) {
+            const channel = MethodChannel('droid_vid_player/storage');
+            final available = await channel.invokeMethod<int>('availableBytes');
+            // Temporary source slice + output growth + working headroom.
+            final reserve = region.length * 2 + 512 * 1024 * 1024;
+            if (available == null || available < reserve) {
+              _fullJobStatus[i] = 'Paused — insufficient free space';
+              throw StateError('Not enough free space for job ${i + 1}. '
+                  'Keep at least ${(reserve / 1073741824).toStringAsFixed(2)} '
+                  'GB free. Earlier clips were preserved.');
+            }
+          }
+
+          if (mounted) setState(() {
+            _fullJobStatus[i] = 'Copying isolated source bytes';
+            _status = 'Job ${i + 1}/${regions.length} ($label): '
+                'preparing an isolated input. Original is untouched.';
+          });
+          await MpegFullScan.copyByteRange(
+            source, temporary, region.startByte, region.endByte,
+            isCancelled: () => _cancelScan,
+          );
+          if (_cancelScan) throw const MpegScanCancelled();
+
+          _stopSegmentTimer();
+          _segmentStem = stem;
+          _segmentDirectory = directory.path;
+          _segmentCount = 0;
+          _closedSegments = 0;
+          _frames = 0;
+          _processed = Duration.zero;
+          _segmentTimer = Timer.periodic(const Duration(seconds: 3),
+              (_) => unawaited(_checkSegments()));
+          if (mounted) setState(() {
+            _fullJobStatus[i] = 'Recovering video into MKV segments';
+            _status = 'Job ${i + 1}/${regions.length} ($label): '
+                'recovering into separate 90-second clips.';
+          });
+
+          final finished = Completer<FFmpegSession>();
+          final args = RecoverySegments.args(
+            inputArgs: [
+              '-hide_banner', '-nostdin', '-loglevel', 'warning',
+              '-fflags', '+genpts+discardcorrupt',
+              '-err_detect', 'ignore_err',
+              '-threads', '2',
+              '-f', 'mpeg', '-i', temporary.path,
+              '-map', region.videoStream, '-sn', '-dn',
+            ],
+            pattern: pattern, legacyMpeg: true,
+          );
+          final session = await FFmpegKit.executeWithArgumentsAsync(
+            args,
+            (ended) {
+              if (!finished.isCompleted) finished.complete(ended);
+            },
+            null,
+            (stats) {
+              if (!mounted || generation != _generation) return;
+              final now = DateTime.now();
+              if (now.difference(_lastRecoveryPaint).inMilliseconds < 500) {
+                return;
+              }
+              _lastRecoveryPaint = now;
+              setState(() {
+                _processed = Duration(milliseconds:
+                    stats.getTime().clamp(0, 1 << 53).toInt());
+                _frames = stats.getVideoFrameNumber();
+              });
+            },
+          );
+          _sessionId = session.getSessionId();
+          if (_cancelScan && _sessionId != null) {
+            await FFmpegKit.cancel(_sessionId);
+          }
+          final ended = await finished.future;
+          _sessionId = null;
+          _stopSegmentTimer();
+          await _checkSegments();
+
+          final clips = await RecoverySegments.list(directory.path, stem);
+          final verified = <String>[];
+          for (final clip in clips) {
+            if (_cancelScan) break;
+            if (await RecoverySegments.hasDecodableStart(clip.path)) {
+              verified.add(clip.path);
+            }
+          }
+          final returnCode = await ended.getReturnCode();
+          final logs = await ended.getLogsAsString();
+          await logFile.writeAsString(
+            'Full-file recovery job ${i + 1}/${regions.length}\n'
+            'Source: ${widget.sourcePath}\n'
+            'Byte range: ${region.startByte}–${region.endByte}\n'
+            'Source fraction: $label\n'
+            'Selected stream: ${region.videoStream}\n'
+            'Result: ${verified.length} verified / ${clips.length} output clips\n'
+            'FFmpeg exit: $returnCode\n\n$logs',
+            flush: true,
+          );
+          _fullVerifiedSegments += verified.length;
+          completed++;
+          if (_resultPath == null && verified.isNotEmpty) {
+            _resultPath = verified.first;
+          }
+          if (mounted) setState(() {
+            _fullJobStatus[i] =
+                '${verified.length} verified / ${clips.length} clips';
+            _status = 'Finished job ${i + 1}/${regions.length}. '
+                'Continuing through remaining sections…';
+          });
+        } on MpegScanCancelled {
+          rethrow;
+        } catch (e) {
+          // A failed region is not a reason to give up on later sections.
+          if (mounted) setState(() {
+            if (!_fullJobStatus[i].startsWith('Paused')) {
+              _fullJobStatus[i] = 'Failed — $e';
+            }
+            _status = 'Job ${i + 1}/${regions.length} failed; '
+                'continuing with the next region.';
+          });
+        } finally {
+          _stopSegmentTimer();
+          _sessionId = null;
+          try {
+            if (await temporary.exists()) await temporary.delete();
+          } catch (_) {}
+        }
+      }
+      if (mounted) setState(() {
+        _status = 'Full 0–100% scan and queue finished: '
+            '$completed / ${regions.length} jobs processed, '
+            '$_fullVerifiedSegments locally verified video clips. '
+            'Find every saved clip under Saved Recoveries → Segments.';
+      });
+    } on MpegScanCancelled {
+      if (mounted) setState(() {
+        _status = 'Full-file recovery stopped. Already saved segments remain.';
+      });
+    } catch (e) {
+      if (mounted) setState(() {
+        _error = 'Full-file recovery stopped: $e';
+        _status = 'Recovery was interrupted; existing clips were preserved.';
+      });
+    } finally {
+      _stopSegmentTimer();
+      _sessionId = null;
+      await _wake(false);
+      if (mounted && generation == _generation) {
+        setState(() {
+          _running = false;
+          _cancelling = false;
+        });
+      }
+    }
+  }
+
+
   Future<void> _start() async {
     if (_running || _savingGallery) return;
     if (_mode == RecoveryMode.advancedAnalysis) {
@@ -193,6 +454,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     if (!await File(widget.sourcePath).exists()) {
       setState(() => _error = 'The selected file is no longer accessible. '
           'Reopen it with the file picker before retrying.');
+      return;
+    }
+    if (_mode == RecoveryMode.pastCrash && _fullScan) {
+      await _runFullRecovery();
       return;
     }
     if ((_mode == RecoveryMode.deepHighQuality || _mode == RecoveryMode.pastCrash) && Platform.isAndroid) {
@@ -478,12 +743,17 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
 
   Future<void> _cancel() async {
     if (!_running || _cancelling) return;
-    if (_mode == RecoveryMode.advancedAnalysis) {
+    if (_mode == RecoveryMode.advancedAnalysis ||
+        (_mode == RecoveryMode.pastCrash && _fullScan)) {
       setState(() {
         _cancelScan = true;
         _cancelling = true;
-        _status = 'Stopping analysis…';
+        _status = 'Stopping scan/queue; saved clips will remain…';
       });
+      final id = _sessionId;
+      if (id != null) {
+        try { await FFmpegKit.cancel(id); } catch (_) {}
+      }
       return;
     }
     setState(() {
@@ -594,9 +864,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                         ? 'Decodes frames and audio into 90-second MKV segments. Requires '
                           'FFmpeg to recognize the input container.'
                         : _mode == RecoveryMode.pastCrash
-                            ? 'Starts at a later position in the MPEG file '
-                              'to bypass the repeatedly crashing region. '
-                              'Creates fresh, separate segments.'
+                            ? 'Full-file MPEG mode scans all source bytes '
+                              '(0–100%), verifies local decoded video, '
+                              'and recovers sections as separate bounded jobs. '
+                              'Manual byte jump remains available.'
                             : 'Scans MP4 box markers and potential raw H.264/H.265 '
                           'headers without loading the full video in memory. '
                           'Analysis does not reconstruct a missing MP4 index, '
@@ -605,6 +876,18 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               ),
               if (_mode == RecoveryMode.pastCrash) ...[
                 const SizedBox(height: 8),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Full-file scan: 0–100%'),
+                  subtitle: const Text(
+                    'Examine the entire MPEG-PS file, test local frames, '
+                    'and recover separate queued sections. Large files '
+                    'can take a long time.'),
+                  value: _fullScan,
+                  onChanged: locked ? null :
+                      (value) => setState(() => _fullScan = value),
+                ),
+                if (!_fullScan) ...[
                 Text('Begin beyond $_jumpPercent% of source bytes'),
                 Slider(
                   value: _jumpPercent.toDouble(),
@@ -620,6 +903,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 if (_lastJump != null)
                   Text('Byte start: ${_lastJump!.alignedByte} / '
                       '${_lastJump!.sourceBytes}'),
+                ],
               ],
               const SizedBox(height: 12),
               RecoveryDestinationPicker(disabled: locked),
@@ -635,11 +919,20 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 const SizedBox(height: 12),
                 _mode == RecoveryMode.advancedAnalysis
                     ? LinearProgressIndicator(value: _scanProgress)
-                    : const LinearProgressIndicator(),
+                    : _mode == RecoveryMode.pastCrash && _fullScan &&
+                            _fullByteProgress < 1
+                        ? LinearProgressIndicator(value: _fullByteProgress)
+                        : const LinearProgressIndicator(),
                 const SizedBox(height: 8),
                 if (_mode == RecoveryMode.advancedAnalysis)
                   Text('Analyzed: ${(_scanProgress * 100).toStringAsFixed(0)}%')
-                else ...[
+                else if (_mode == RecoveryMode.pastCrash && _fullScan) ...[
+                  Text('Source bytes inspected: '
+                      '${(_fullByteProgress * 100).toStringAsFixed(0)}% · '
+                      'Decoder checks: $_fullProbeDone/$_fullProbeTotal'),
+                  Text('Verified clips: $_fullVerifiedSegments · '
+                      'Current job frames: $_frames'),
+                ] else ...[
                   Text('Processed output time: ${_duration(_processed)}'
                        '  ·  Frames: $_frames'),
                   if (_mode == RecoveryMode.deepHighQuality ||
@@ -654,6 +947,23 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                   const Text('Progress is not a percentage because damaged '
                              'videos may report an incorrect duration.'),
                 ],
+              ],
+              if (_mode == RecoveryMode.pastCrash && _fullScan &&
+                  _fullRegions.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text('Recovery jobs (${_fullRegions.length})',
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
+                for (var i = 0; i < _fullRegions.length; i++)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: Text(
+                      'Job ${i + 1}: '
+                      '${_fullRegions[i].startPercent.toStringAsFixed(1)}–'
+                      '${_fullRegions[i].endPercent.toStringAsFixed(1)}% '
+                      '· ${_fullJobStatus[i]}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
               ],
               if (_mode == RecoveryMode.advancedAnalysis &&
                   _scan != null && !_running)
@@ -714,7 +1024,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                       : _mode == RecoveryMode.deepHighQuality
                           ? 'Start High-Quality Deep Recovery'
                           : _mode == RecoveryMode.pastCrash
-                              ? 'Recover Past Crash'
+                              ? (_fullScan
+                                  ? 'Scan 0–100% & Recover Sections'
+                                  : 'Recover Past Crash (Manual)')
                               : 'Analyze File Structure'),
                 ),
               if (_running)
@@ -726,6 +1038,16 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                           ? 'Cancel analysis' : 'Stop recovery'),
                 ),
               if (_resultPath != null) ...[
+                if (_mode == RecoveryMode.pastCrash && _fullScan)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: Text(
+                      'All clips are under Saved Recoveries → Segments. '
+                      'The play/export buttons below refer only to the '
+                      'first verified clip.',
+                      style: TextStyle(color: Colors.amberAccent),
+                    ),
+                  ),
                 const SizedBox(height: 12),
                 SelectableText('App copy: ${p.basename(_resultPath!)}'),
                 if (_savingGallery) const LinearProgressIndicator(),
