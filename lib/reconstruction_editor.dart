@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import 'package:path/path.dart' as p;
@@ -56,6 +57,8 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
   String? _notice;
   String? _error;
   String? _segmentFilter;
+  bool _floating = false;
+  Offset? _floatingPosition;
 
   int _segmentNumber(String path) {
     final match = RegExp(r'\.segment_(\d+)\.mkv$')
@@ -251,6 +254,32 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
     } catch (error) {
       if (mounted) setState(() => _error = 'Cannot preview clip: $error');
     }
+  }
+
+
+  /// A piece preview floats over the scrolling assignment lists, using
+  /// the same video controller as the editor to avoid duplicate decoders.
+  Future<void> _openFloating(_Piece piece) async {
+    await _open(piece);
+    if (!mounted || _selected?.id != piece.id || _player == null) return;
+    setState(() {
+      _floating = true;
+      _floatingPosition = null;
+    });
+    await _player!.play();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _togglePreviewPlayback({bool floatOnPlay = false}) async {
+    final video = _player;
+    if (_busy || video == null) return;
+    if (video.value.isPlaying) {
+      await video.pause();
+    } else {
+      if (floatOnPlay && mounted) setState(() => _floating = true);
+      await video.play();
+    }
+    if (mounted && identical(video, _player)) setState(() {});
   }
 
   void _positionChanged() {
@@ -547,7 +576,13 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
     return Column(children: [
       Text(_pieceLabel(part),
           style: Theme.of(context).textTheme.titleMedium),
-      if (video != null && video.value.isInitialized)
+      if (_floating)
+        OutlinedButton.icon(
+          onPressed: () => setState(() => _floating = false),
+          icon: const Icon(Icons.picture_in_picture_alt),
+          label: const Text('Video is floating · Return to full preview'),
+        )
+      else if (video != null && video.value.isInitialized)
         AspectRatio(aspectRatio: video.value.aspectRatio,
             child: VideoPlayer(video))
       else const SizedBox(height: 120,
@@ -560,14 +595,8 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
       Wrap(spacing: 6, children: [
         IconButton(
           tooltip: 'Play / pause',
-          onPressed: video == null || _busy ? null : () async {
-            if (video.value.isPlaying) {
-              await video.pause();
-            } else {
-              await video.play();
-            }
-            if (mounted) setState(() {});
-          },
+          onPressed: video == null || _busy ? null : () =>
+              unawaited(_togglePreviewPlayback(floatOnPlay: true)),
           icon: Icon(video?.value.isPlaying == true
               ? Icons.pause : Icons.play_arrow),
         ),
@@ -590,6 +619,105 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
     ]);
   }
 
+
+  /// A draggable picture-in-picture preview stays fixed while the user
+  /// scrolls, assigns pieces, and reorders the recording lists underneath.
+  Widget _floatingPreview(BoxConstraints bounds) {
+    final part = _selected;
+    final video = _player;
+    if (part == null) return const SizedBox.shrink();
+
+    final width = math.min(280.0, math.max(160.0, bounds.maxWidth - 16));
+    const estimatedHeight = 270.0;
+    final maxLeft = math.max(8.0, bounds.maxWidth - width - 8);
+    final maxTop = math.max(8.0, bounds.maxHeight - estimatedHeight - 8);
+    final left = (_floatingPosition?.dx ?? maxLeft)
+        .clamp(8.0, maxLeft).toDouble();
+    final top = (_floatingPosition?.dy ?? 8.0)
+        .clamp(8.0, maxTop).toDouble();
+    final position = _at.clamp(part.start, part.end).toDouble();
+
+    return Positioned(
+      left: left,
+      top: top,
+      width: width,
+      child: Material(
+        elevation: 12,
+        color: Theme.of(context).colorScheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        clipBehavior: Clip.antiAlias,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Row(children: [
+            Expanded(child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onPanUpdate: (details) {
+                setState(() {
+                  _floatingPosition = Offset(
+                    (left + details.delta.dx).clamp(8.0, maxLeft).toDouble(),
+                    (top + details.delta.dy).clamp(8.0, maxTop).toDouble(),
+                  );
+                });
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 10, vertical: 8),
+                child: Row(children: [
+                  const Icon(Icons.drag_indicator, size: 19),
+                  const SizedBox(width: 5),
+                  Expanded(child: Text(_pieceLabel(part),
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12,
+                        fontWeight: FontWeight.bold))),
+                ]),
+              ),
+            )),
+            IconButton(
+              tooltip: 'Return video to the editor',
+              onPressed: () => setState(() {
+                _floating = false;
+                _floatingPosition = null;
+              }),
+              icon: const Icon(Icons.close, size: 20),
+            ),
+          ]),
+          ColoredBox(
+            color: Colors.black,
+            child: SizedBox(
+              width: width,
+              height: 140,
+              child: video != null && video.value.isInitialized
+                  ? Center(child: AspectRatio(
+                      aspectRatio: video.value.aspectRatio,
+                      child: VideoPlayer(video),
+                    ))
+                  : const Center(child: CircularProgressIndicator()),
+            ),
+          ),
+          Row(children: [
+            IconButton(
+              tooltip: 'Play or pause floating preview',
+              onPressed: video == null || _busy ? null :
+                  () => unawaited(_togglePreviewPlayback()),
+              icon: Icon(video?.value.isPlaying == true
+                  ? Icons.pause : Icons.play_arrow),
+            ),
+            Expanded(child: Text(
+              '${_clock(position.round())} / ${_clock(part.end)}',
+              maxLines: 1, textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12))),
+            const SizedBox(width: 12),
+          ]),
+          Slider(
+            value: position,
+            min: part.start.toDouble(),
+            max: part.end.toDouble(),
+            onChanged: _busy ? null : (value) => unawaited(_seek(value)),
+          ),
+        ]),
+      ),
+    );
+  }
+
   Widget _pieceRow(_Piece piece) => Card(
     child: Padding(padding: const EdgeInsets.all(10),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -603,7 +731,7 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
             style: Theme.of(context).textTheme.bodySmall),
         Wrap(spacing: 6, children: [
           TextButton.icon(
-            onPressed: _busy ? null : () => unawaited(_open(piece)),
+            onPressed: _busy ? null : () => unawaited(_openFloating(piece)),
             icon: const Icon(Icons.play_arrow),
             label: const Text('Preview'),
           ),
@@ -643,11 +771,15 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
       appBar: AppBar(title: const Text('Reconstruct Recordings')),
       body: _loading
         ? const Center(child: CircularProgressIndicator())
-        : SafeArea(child: ListView(padding: const EdgeInsets.all(12),
-            children: [
+        : SafeArea(child: LayoutBuilder(
+            builder: (context, bounds) => Stack(children: [
+              ListView(padding: const EdgeInsets.all(12),
+                children: [
               const Text('Find the scramble, split at its edges, exclude '
                   'the damaged piece, then assign and reorder the surviving '
                   'pieces. Original segments are never modified.'),
+              const Text('Tap Preview or Play to float the video over '
+                  'the lists. Drag its title bar to move it.'),
               _segmentNavigator(),
               const SizedBox(height: 12),
               _preview(),
@@ -699,7 +831,10 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
                   'The original footage remains untouched.',
                   style: TextStyle(fontSize: 12)),
               const SizedBox(height: 24),
-            ])),
+                ]),
+              if (_floating) _floatingPreview(bounds),
+            ]),
+          )),
     ),
   );
 }
