@@ -15,8 +15,15 @@ import 'saved_recoveries_screen.dart';
 /// stationary frame; this is intentionally scrubbing, not reverse playback.
 class AndroidV2Player extends StatefulWidget {
   final Widget Function(BuildContext, String?)? legacyBuilder;
+  final String? initialPath;
+  final bool savedLibraryEnabled;
 
-  const AndroidV2Player({super.key, this.legacyBuilder});
+  const AndroidV2Player({
+    super.key,
+    this.legacyBuilder,
+    this.initialPath,
+    this.savedLibraryEnabled = true,
+  });
 
   @override
   State<AndroidV2Player> createState() => _AndroidV2PlayerState();
@@ -88,6 +95,12 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   void initState() {
     super.initState();
     _hardware.setMethodCallHandler(_onHardwareEvent);
+    if (widget.initialPath != null) {
+      _files.add(widget.initialPath!);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_openFile());
+      });
+    }
   }
 
   Future<void> _onHardwareEvent(MethodCall call) async {
@@ -818,15 +831,39 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   }
 
   Future<void> _savedRecoveries() async {
+    if (!widget.savedLibraryEnabled) return;
+    // Free both decoders while browsing recovered multi-GB clips.
+    ++_fileGeneration;
+    _hideTimer?.cancel();
+    _closeHardwarePreview();
+    final old = _video;
+    old?.removeListener(_onVideoChanged);
+    if (mounted) setState(() => _video = null);
+    try {
+      await old?.dispose();
+      await _hardware.invokeMethod<void>('close')
+          .timeout(const Duration(seconds: 5));
+    } catch (error) {
+      debugPrint('Decoder cleanup before Saved Recoveries: $error');
+    }
+    if (!mounted) return;
     final file = await Navigator.of(context).push<String>(
       MaterialPageRoute<String>(
-        builder: (_) => const SavedRecoveriesScreen(),
+        builder: (_) => SavedRecoveriesScreen(
+          playbackBuilder: (path) => AndroidV2Player(
+            initialPath: path,
+            savedLibraryEnabled: false,
+          ),
+        ),
       ),
     );
-    if (!mounted || file == null || !await File(file).exists()) return;
-    _files..clear()..add(file);
-    _index = 0;
-    await _openFile();
+    if (!mounted) return;
+    _hardware.setMethodCallHandler(_onHardwareEvent);
+    if (file != null && await File(file).exists()) {
+      _files..clear()..add(file);
+      _index = 0;
+    }
+    if (_source != null) await _openFile();
   }
 
   Future<void> _compare() async {
@@ -931,7 +968,14 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       child: ColoredBox(
         color: Colors.black.withValues(alpha: 0.65),
         child: Row(children: [
-          const SizedBox(width: 12),
+          if (widget.initialPath != null)
+            IconButton(
+              tooltip: 'Back to Saved Recoveries',
+              onPressed: () => Navigator.of(context).pop(),
+              icon: const Icon(Icons.arrow_back),
+            )
+          else
+            const SizedBox(width: 12),
           Expanded(child: Text(p.basename(_source ?? 'Droid Vid Player'),
             maxLines: 1, overflow: TextOverflow.ellipsis)),
           IconButton(
@@ -961,8 +1005,9 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
               }
             },
             itemBuilder: (_) => [
-              const PopupMenuItem(value: 'saved',
-                child: Text('Saved Recoveries')),
+              if (widget.savedLibraryEnabled)
+                const PopupMenuItem(value: 'saved',
+                  child: Text('Saved Recoveries')),
               PopupMenuItem(value: 'fill',
                 child: Text(_fill ? 'Fit video' : 'Fill display')),
               PopupMenuItem(value: 'repeat',
@@ -1127,10 +1172,11 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.white70)),
           const SizedBox(height: 20),
-          OutlinedButton.icon(
-            onPressed: () => unawaited(_savedRecoveries()),
-            icon: const Icon(Icons.folder_copy_outlined),
-            label: const Text('Saved Recoveries')),
+          if (widget.savedLibraryEnabled)
+            OutlinedButton.icon(
+              onPressed: () => unawaited(_savedRecoveries()),
+              icon: const Icon(Icons.folder_copy_outlined),
+              label: const Text('Saved Recoveries')),
           const SizedBox(height: 8),
           FilledButton.icon(
             onPressed: () => unawaited(_pickFile()),
