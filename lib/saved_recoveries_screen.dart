@@ -26,6 +26,8 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   List<String> paths = [];
   bool loading = true;
   bool busy = false;
+  bool _exporting = false;
+  String? _exportTarget;
   String? message;
   _RecoveryView _view = _RecoveryView.all;
   bool _selecting = false;
@@ -209,43 +211,161 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
 
   Future<void> export(String path) async {
     if (busy) return;
-    final length = await File(path).length();
-    if (!mounted) { return; }
-    final ok = await showDialog<bool>(
+    int length;
+    String destinationLabel;
+    try {
+      length = await File(path).length();
+      destinationLabel = await RecoveryDestination.selectedLabel();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => message = 'Unable to prepare export: $error');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not prepare the video export.')),
+      );
+      return;
+    }
+    if (!mounted) return;
+    final name = p.basename(path);
+    final gallery = destinationLabel == 'Default: Gallery / Droid Vid Player';
+    final destinationName = gallery
+        ? 'Gallery / Droid Vid Player'
+        : destinationLabel;
+    final approved = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Export a copy?'),
-        content: Text('This file is ${size(length)}. Exporting may '
-            'need that much additional free storage. The private original '
-            'will not be deleted.'),
+      builder: (dialog) => AlertDialog(
+        title: const Text('Export this video?'),
+        content: SingleChildScrollView(child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(name, maxLines: 3, overflow: TextOverflow.ellipsis),
+            const SizedBox(height: 10),
+            Text('Size: ${size(length)}'),
+            const SizedBox(height: 8),
+            const Text('Save to:', style: TextStyle(
+                fontWeight: FontWeight.bold)),
+            Text(destinationName),
+            const SizedBox(height: 8),
+            const Text('Exporting creates a separate file and may take '
+                'several minutes. The original recovered segment will '
+                'remain in Droid Vid Player.'),
+          ],
+        )),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Export')),
+          TextButton(
+            onPressed: () => Navigator.pop(dialog, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialog, true),
+            child: const Text('Start export'),
+          ),
         ],
       ),
     );
-    if (ok != true || !mounted) { return; }
-    setState(() { busy = true; message = 'Exporting file…'; });
+    if (approved != true || !mounted) return;
+    setState(() {
+      busy = true;
+      _exporting = true;
+      _exportTarget = destinationName;
+      message = 'Exporting $name to $destinationName… '
+          'Keep the app open until confirmation appears.';
+    });
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Export started: saving to $destinationName…'),
+        duration: const Duration(seconds: 4)),
+    );
+
+    String? savedTo;
+    String? failure;
     try {
-      final uri = await RecoveryDestination.selectedUri();
-      if (uri == null || uri.isEmpty) {
-        if (mounted) setState(() => message = 'Choose a destination folder first.');
-        return;
-      }
-      await RecoveryDestination.exportToChosenFolder(path);
-      if (mounted) {
-        setState(() => message =
-            'Export finished. The private original was preserved.');
-      }
-    } catch (e) {
-      if (mounted) setState(() => message = 'Export failed: $e');
+      // Honor the configured default Gallery even when no SAF folder exists.
+      savedTo = await RecoveryDestination.exportRecoveredVideo(path);
+    } catch (error) {
+      failure = '$error';
     } finally {
-      if (mounted) setState(() => busy = false);
+      if (mounted) {
+        setState(() {
+          busy = false;
+          _exporting = false;
+          _exportTarget = null;
+          message = savedTo != null
+              ? 'Export completed: $name\nSaved to: $savedTo. '
+                'The original recovered segment was preserved.'
+              : 'Export was not confirmed for $name: '
+                '${failure ?? "Unknown error"}. '
+                'The source segment is still saved in Droid Vid Player.';
+        });
+      }
+    }
+    if (!mounted) return;
+    final confirmedDestination = savedTo;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    if (confirmedDestination != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Export complete · $confirmedDestination'),
+        duration: const Duration(seconds: 7),
+      ));
+      await showDialog<void>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          title: const Text('Export complete'),
+          content: SingleChildScrollView(child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('The video was saved to:'),
+              const SizedBox(height: 6),
+              SelectableText(confirmedDestination,
+                  style: const TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 12),
+              const Text('File:'),
+              SelectableText(name),
+              if (gallery && p.extension(path).toLowerCase() == '.mkv') ...[
+                const SizedBox(height: 12),
+                const Text('Some Gallery apps do not display MKV videos. '
+                    'If it is not visible, choose an export folder instead '
+                    'and locate it through My Files.'),
+              ],
+              const SizedBox(height: 12),
+              const Text('The original recovered segment was not deleted.'),
+            ],
+          )),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialog),
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Export failed. Your recovered segment is still safe.'),
+        duration: Duration(seconds: 7),
+      ));
+      await showDialog<void>(
+        context: context,
+        builder: (dialog) => AlertDialog(
+          title: const Text('Export did not finish'),
+          content: SingleChildScrollView(
+            child: Text('Destination: $destinationName\n\n'
+                '${failure ?? "Unknown error"}\n\n'
+                'The original segment remains available in Saved '
+                'Recoveries. You can choose another destination using '
+                'the three-dot Recovery tools menu, then retry.'),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(dialog),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
     }
   }
-
 
   /// Segment files referenced by saved reconstruction edit decisions.
   Future<Set<String>> _projectReferences() async {
@@ -619,6 +739,18 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
           ),
         ],
       ),
+      bottomNavigationBar: _exporting
+          ? SafeArea(child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const LinearProgressIndicator(),
+                const SizedBox(height: 8),
+                Text('Exporting to ${_exportTarget ?? "selected destination"}…'),
+                const Text('Please keep the app open until export completes.',
+                    style: TextStyle(fontSize: 12)),
+              ]),
+            ))
+          : null,
       // One unified scrolling viewport: headers, segment cards and controls
       // all travel together, rather than trapping files in a short list.
       body: CustomScrollView(
