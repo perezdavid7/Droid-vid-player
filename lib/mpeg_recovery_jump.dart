@@ -1,5 +1,9 @@
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:async';
+
+import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
 
 /// Finds an MPEG Program Stream pack boundary after a user-chosen physical
 /// file position. This uses source BYTES, never damaged source timestamps.
@@ -11,6 +15,7 @@ class MpegRecoveryJump {
   static Future<MpegJumpResult> locate(
     String path, {
     required int percent,
+    int extraBytes = 0,
   }) async {
     if (percent < 10 || percent > 90) {
       throw ArgumentError.value(percent, 'percent', 'Must be 10–90');
@@ -20,8 +25,8 @@ class MpegRecoveryJump {
     if (size < 1024 * 1024) {
       throw StateError('The source is too small for byte-jump recovery.');
     }
-    final approximate = size ~/ 100 * percent +
-        ((size % 100) * percent ~/ 100);
+    final approximate = (size ~/ 100 * percent +
+        ((size % 100) * percent ~/ 100) + extraBytes).clamp(0, size - 1);
     final stop = math.min(size, approximate + _windowBytes);
     final input = await file.open();
     var cursor = approximate;
@@ -66,6 +71,102 @@ class MpegRecoveryJump {
         'within 16 MB after the selected $percent% position. '
         'Try a different percentage; no recovery files were created.');
   }
+
+  /// A short video decode is required before starting full-length recovery.
+  /// A damaged program stream may advertise several Video: none tracks.
+  static Future<MpegDecodedStart> findDecodableStart(
+    String path, {
+    required int percent,
+    void Function(String)? onProgress,
+  }) async {
+    const offsets = <int>[
+      0,
+      32 * 1024 * 1024,
+      128 * 1024 * 1024,
+    ];
+    final diagnostics = <String>[];
+    for (final extra in offsets) {
+      MpegJumpResult jump;
+      try {
+        jump = await locate(path, percent: percent, extraBytes: extra);
+      } catch (error) {
+        diagnostics.add('Boundary scan +${extra ~/ 1048576} MiB: $error');
+        continue;
+      }
+      for (var index = 0; index < 4; index++) {
+        final stream = '0:v:$index';
+        onProgress?.call('Testing video stream ${index + 1}/4 '
+            'near $percent% + ${extra ~/ 1048576} MiB. '
+            'No recovery data is being saved yet.');
+        final result = await _testFrames(path, jump.alignedByte, stream);
+        if (result.ok) {
+          return MpegDecodedStart(jump: jump, stream: stream);
+        }
+        diagnostics.add('At byte ${jump.alignedByte} / $stream: '
+            '${result.reason}');
+      }
+    }
+    throw StateError('No decodable video stream found near '
+        '$percent% (also tested +32 and +128 MiB). '
+        'No video segments were created. Try 50% or 70%. '
+        'Probe results: ${diagnostics.take(5).join(" | ")}');
+  }
+
+  static Future<({bool ok, String reason})> _testFrames(
+      String path, int offset, String stream) async {
+    final done = Completer<void>();
+    int? sessionId;
+    try {
+      final session = await FFmpegKit.executeWithArgumentsAsync([
+        '-hide_banner', '-nostdin', '-loglevel', 'info',
+        '-fflags', '+genpts+discardcorrupt',
+        '-err_detect', 'ignore_err',
+        '-probesize', '16000000',
+        '-analyzeduration', '20000000',
+        '-max_probe_packets', '20000',
+        '-threads', '1',
+        '-skip_initial_bytes', '$offset',
+        '-f', 'mpeg', '-i', path,
+        '-map', stream,
+        '-an', '-sn', '-dn',
+        '-vf', 'showinfo',
+        '-frames:v', '3',
+        '-f', 'null', '-',
+      ], (finished) {
+        if (!done.isCompleted) done.complete();
+      });
+      sessionId = session.getSessionId();
+      await done.future.timeout(const Duration(seconds: 20));
+      final code = await session.getReturnCode();
+      final logs = await session.getLogsAsString();
+      final decoded = RegExp(r'showinfo.*\bn:\s*\d+').hasMatch(logs);
+      if (ReturnCode.isSuccess(code) && decoded) {
+        return (ok: true, reason: 'decoded frames');
+      }
+      final lines = logs.split('\n')
+          .where((line) => line.contains('Decoder') ||
+              line.contains('codec parameters') ||
+              line.contains('Stream map') ||
+              line.contains('Output file') ||
+              line.contains('Error'))
+          .toList();
+      return (ok: false, reason: lines.isEmpty
+          ? 'No video frames decoded'
+          : lines.last.trim().substring(
+              0, math.min(lines.last.trim().length, 120)));
+    } on TimeoutException {
+      if (sessionId != null) await FFmpegKit.cancel(sessionId);
+      return (ok: false, reason: '20-second probe timeout');
+    } catch (error) {
+      return (ok: false, reason: '$error');
+    }
+  }
+}
+
+class MpegDecodedStart {
+  final MpegJumpResult jump;
+  final String stream;
+  const MpegDecodedStart({required this.jump, required this.stream});
 }
 
 class MpegJumpResult {
