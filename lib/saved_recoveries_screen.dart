@@ -43,9 +43,9 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
       ? '${(bytes / 1073741824).toStringAsFixed(2)} GB'
       : '${(bytes / 1048576).toStringAsFixed(1)} MB';
 
-  Future<void> refresh() async {
+  Future<void> refresh({bool keepMessage = false}) async {
     if (busy) { return; }
-    setState(() { loading = true; message = null; });
+    setState(() { loading = true; if (!keepMessage) message = null; });
     try {
       final dir = Directory(p.join(
           (await getApplicationDocumentsDirectory()).path,
@@ -391,7 +391,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     } finally {
       if (mounted) {
         setState(() => busy = false);
-        await refresh();
+        await refresh(keepMessage: true);
       }
     }
   }
@@ -518,6 +518,40 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
             ]),
             Text('Showing ${visible.length} of ${paths.length} saved files',
                 style: Theme.of(context).textTheme.bodySmall),
+            Row(children: [
+              TextButton.icon(
+                onPressed: busy || loading ? null : () => setState(() {
+                  _selecting = !_selecting;
+                  if (!_selecting) _selectedPaths.clear();
+                }),
+                icon: Icon(_selecting ? Icons.close : Icons.checklist),
+                label: Text(_selecting ? 'Done selecting' : 'Select files'),
+              ),
+              if (_selecting)
+                TextButton(
+                  onPressed: busy || loading ? null : () => setState(() {
+                    _selectedPaths.addAll(visible.map((i) => paths[i]));
+                  }),
+                  child: const Text('Select visible'),
+                ),
+            ]),
+            if (_selecting)
+              Wrap(spacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text('${_selectedPaths.length} selected'),
+                  TextButton(
+                    onPressed: busy ? null : () => setState(
+                        () => _selectedPaths.clear()),
+                    child: const Text('Clear'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: busy || _selectedPaths.isEmpty ? null :
+                        () => unawaited(_deleteFiles(_selectedPaths.toList())),
+                    icon: const Icon(Icons.delete_outline),
+                    label: const Text('Delete selected'),
+                  ),
+                ],
+              ),
             if (exitError != null)
               Text(exitError!, style: const TextStyle(fontSize: 12)),
             if (lastFatalException != null &&
@@ -576,9 +610,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                 final name = p.basename(path);
                 final incomplete = name.contains('.partial.') ||
                     name.contains('.working.');
-                final ext = p.extension(path).toLowerCase();
-                final video = const {'.mp4', '.mkv', '.mov', '.mpg',
-                    '.mpeg', '.avi'}.contains(ext);
+                final video = isVideoFile(path);
                 final similar = paths.where((other) =>
                     sourceGroup(p.basename(other)) == sourceGroup(name)).length;
                 final match = RegExp(r'\.segment_(\d+)\.mkv$')
@@ -586,20 +618,46 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                 final segmentNumber = match == null ? null :
                     (int.tryParse(match.group(1) ?? '') ?? 0) + 1;
                 final checkpoint = name.endsWith('.checkpoint.txt');
-                return Card(child: Padding(
+                final run = isSegment(path) ? segmentRun(path) : null;
+                final attempt = run == null ? null : runNumbers[run];
+                final isRunStart = run != null &&
+                    (row == 0 ||
+                        !isSegment(paths[visible[row - 1]]) ||
+                        segmentRun(paths[visible[row - 1]]) != run);
+                return Column(crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (_view == _RecoveryView.segments && isRunStart)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(8, 16, 8, 6),
+                        child: Text('Recovery attempt $attempt '
+                            '· ${runDate(run)} '
+                            '· ${runCounts[run]} segments',
+                            style: const TextStyle(fontSize: 16,
+                                fontWeight: FontWeight.bold)),
+                      ),
+                    Card(child: Padding(
                   padding: const EdgeInsets.all(10),
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     if (segmentNumber != null)
-                      Text('Segment $segmentNumber',
+                      Text('Attempt ${attempt ?? "?"} · '
+                          'Segment $segmentNumber of ${runCounts[run] ?? "?"}',
                           style: const TextStyle(fontSize: 18,
                               fontWeight: FontWeight.bold)),
-                    Text(name, maxLines: 3, overflow: TextOverflow.ellipsis),
+                    if (_selecting)
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Select this file for deletion'),
+                        value: _selectedPaths.contains(path),
+                        onChanged: busy ? null :
+                            (_) => _toggleSelection(path),
+                      ),
+                    Text(name, maxLines: 2, overflow: TextOverflow.ellipsis),
                     Text('${size(stats[i].size)}'
                         '${incomplete ? ' · Incomplete/working' : ' · Saved'}'
                         '${video ? '' : ' · Non-video'}'),
                     if (similar > 1)
-                      Text('$similar attempts share this source name; '
-                          'not confirmed byte-for-byte duplicates.'),
+                      Text('$similar saved files share this source name; '
+                          'these are not confirmed duplicates.'),
                     Wrap(spacing: 6, children: [
                       if (checkpoint)
                         OutlinedButton(
@@ -621,12 +679,21 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                         child: const Text('Play'),
                       ),
                       FilledButton.tonal(
-                        onPressed: busy ? null : () => export(path),
+                        onPressed: busy || !video ? null : () => export(path),
                         child: const Text('Export'),
                       ),
+                      if (!_selecting)
+                        OutlinedButton.icon(
+                          onPressed: busy ? null :
+                              () => unawaited(_deleteFiles([path])),
+                          icon: const Icon(Icons.delete_outline),
+                          label: const Text('Delete'),
+                        ),
                     ]),
                   ]),
-                ));
+                )),
+                  ],
+                );
               })),
       ]),
     );
