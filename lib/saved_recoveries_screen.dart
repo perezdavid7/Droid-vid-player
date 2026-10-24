@@ -459,8 +459,8 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
           padding: const EdgeInsets.all(12),
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             Text('Files: ${paths.length} · Total: ${size(total)}'),
-            const Text('No files will be deleted. A partial video may '
-                'still contain recoverable footage.'),
+            const Text('Files are only deleted when you choose Delete and confirm. '
+                'Partial videos may still contain recoverable footage.'),
             if (segmentCount > 0)
               FilledButton.icon(
                 onPressed: busy ? null : () async {
