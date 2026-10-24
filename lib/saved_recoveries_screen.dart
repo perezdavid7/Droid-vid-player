@@ -11,6 +11,8 @@ import 'recovery_destination.dart';
 import 'raw_video_scan.dart';
 import 'reconstruction_editor.dart';
 
+enum _RecoveryView { all, segments, otherVideos, reports }
+
 class SavedRecoveriesScreen extends StatefulWidget {
   const SavedRecoveriesScreen({super.key});
   @override
@@ -23,7 +25,9 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   bool loading = true;
   bool busy = false;
   String? message;
-  bool segmentsOnly = false;
+  _RecoveryView _view = _RecoveryView.all;
+  bool _selecting = false;
+  final Set<String> _selectedPaths = {};
   List<Map<String, dynamic>> exits = [];
   String? exitError;
   String? lastFatalException;
@@ -71,6 +75,32 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
 
   bool isSegment(String path) =>
       RegExp(r'\.segment_\d+\.mkv$').hasMatch(p.basename(path));
+
+  bool isVideoFile(String path) => const {
+    '.mp4', '.mkv', '.mov', '.mpg', '.mpeg', '.avi',
+    '.wmv', '.m4v', '.webm', '.ts', '.m2ts',
+  }.contains(p.extension(path).toLowerCase());
+
+  String segmentRun(String path) =>
+      path.replaceFirst(RegExp(r'\.segment_\d+\.mkv$'), '');
+
+  int segmentOrdinal(String path) =>
+      int.tryParse(RegExp(r'\.segment_(\d+)\.mkv$')
+          .firstMatch(p.basename(path))?.group(1) ?? '') ?? -1;
+
+  int runTimestamp(String stem) =>
+      int.tryParse(p.basename(stem).split('_').last) ?? 0;
+
+  String runDate(String stem) {
+    final timestamp = runTimestamp(stem);
+    if (timestamp < 1000000000000) return 'Unknown start time';
+    final date = DateTime.fromMillisecondsSinceEpoch(timestamp).toLocal();
+    final hour = date.hour > 12 ? date.hour - 12 :
+        (date.hour == 0 ? 12 : date.hour);
+    final minute = date.minute.toString().padLeft(2, '0');
+    return '${date.month}/${date.day}/${date.year} '
+        '$hour:$minute ${date.hour >= 12 ? "PM" : "AM"}';
+  }
 
   Future<void> loadExits() async {
     try {
@@ -218,10 +248,45 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   Widget build(BuildContext context) {
     final total = stats.fold<int>(0, (sum, stat) => sum + stat.size);
     final segmentCount = paths.where(isSegment).length;
+    final otherVideos = paths.where((x) =>
+        isVideoFile(x) && !isSegment(x)).length;
+    final reports = paths.length - segmentCount - otherVideos;
+    final runStems = paths.where(isSegment).map(segmentRun).toSet().toList()
+      ..sort((a, b) {
+        final byTime = runTimestamp(b).compareTo(runTimestamp(a));
+        return byTime == 0 ? b.compareTo(a) : byTime;
+      });
+    final runNumbers = <String, int>{
+      for (var i = 0; i < runStems.length; i++)
+        runStems[i]: runStems.length - i,
+    };
+    final runCounts = <String, int>{
+      for (final stem in runStems)
+        stem: paths.where((x) => isSegment(x) &&
+            segmentRun(x) == stem).length,
+    };
     final visible = List<int>.generate(paths.length, (index) => index)
-        .where((i) => !segmentsOnly || isSegment(paths[i])).toList();
-    if (segmentsOnly) {
-      visible.sort((a, b) => paths[a].compareTo(paths[b]));
+        .where((i) {
+          final path = paths[i];
+          switch (_view) {
+            case _RecoveryView.all: return true;
+            case _RecoveryView.segments: return isSegment(path);
+            case _RecoveryView.otherVideos:
+              return isVideoFile(path) && !isSegment(path);
+            case _RecoveryView.reports: return !isVideoFile(path);
+          }
+        }).toList();
+    if (_view == _RecoveryView.segments) {
+      visible.sort((a, b) {
+        final groupA = runNumbers[segmentRun(paths[a])] ?? 0;
+        final groupB = runNumbers[segmentRun(paths[b])] ?? 0;
+        final compared = groupB.compareTo(groupA);
+        return compared == 0
+            ? segmentOrdinal(paths[a]).compareTo(segmentOrdinal(paths[b]))
+            : compared;
+      });
+    } else {
+      visible.sort((a, b) => stats[b].modified.compareTo(stats[a].modified));
     }
     return Scaffold(
       appBar: AppBar(title: const Text('Saved Recoveries'), actions: [
@@ -242,8 +307,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
               FilledButton.icon(
                 onPressed: busy ? null : () async {
                   final segments = paths.where(isSegment).toList()..sort();
-                  final groups = segments.map((x) => x.replaceFirst(
-                      RegExp(r'\.segment_\d+\.mkv$'), '')).toSet().toList();
+                  final groups = runStems;
                   if (!mounted) return;
                   final chosen = await showDialog<String>(
                     context: context,
@@ -253,8 +317,9 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                         for (final stem in groups)
                           SimpleDialogOption(
                             onPressed: () => Navigator.pop(ctx, stem),
-                            child: Text('${p.basename(stem)} '
-                                '(${segments.where((x) => x.startsWith('$stem.segment_')).length} clips)'),
+                            child: Text('Attempt ${runNumbers[stem]} · '
+                                '${runDate(stem)} · '
+                                '${runCounts[stem]} segments'),
                           ),
                       ],
                     ),
@@ -269,14 +334,32 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                 icon: const Icon(Icons.movie_edit),
                 label: const Text('Reconstruct Recordings'),
               ),
-            Wrap(children: [
-              FilterChip(
-                label: Text('Segments only ($segmentCount)'),
-                selected: segmentsOnly,
-                onSelected: (value) =>
-                    setState(() => segmentsOnly = value),
+            const SizedBox(height: 8),
+            Wrap(spacing: 6, runSpacing: 4, children: [
+              ChoiceChip(
+                label: Text('All (${paths.length})'),
+                selected: _view == _RecoveryView.all,
+                onSelected: (_) => setState(() => _view = _RecoveryView.all),
+              ),
+              ChoiceChip(
+                label: Text('Segments ($segmentCount)'),
+                selected: _view == _RecoveryView.segments,
+                onSelected: (_) => setState(() => _view = _RecoveryView.segments),
+              ),
+              ChoiceChip(
+                label: Text('Other videos ($otherVideos)'),
+                selected: _view == _RecoveryView.otherVideos,
+                onSelected: (_) => setState(
+                    () => _view = _RecoveryView.otherVideos),
+              ),
+              ChoiceChip(
+                label: Text('Logs & reports ($reports)'),
+                selected: _view == _RecoveryView.reports,
+                onSelected: (_) => setState(() => _view = _RecoveryView.reports),
               ),
             ]),
+            Text('Showing ${visible.length} of ${paths.length} saved files',
+                style: Theme.of(context).textTheme.bodySmall),
             if (exitError != null)
               Text(exitError!, style: const TextStyle(fontSize: 12)),
             if (lastFatalException != null &&
@@ -309,7 +392,11 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                   ])),
                 ],
               ),
-            RecoveryDestinationPicker(disabled: busy),
+            ExpansionTile(
+              title: const Text('Export destination'),
+              subtitle: const Text('Tap to choose or change the folder'),
+              children: [RecoveryDestinationPicker(disabled: busy)],
+            ),
             if (busy) const LinearProgressIndicator(),
             if (message != null)
               ConstrainedBox(
