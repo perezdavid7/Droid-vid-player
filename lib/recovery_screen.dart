@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'recovery_segments.dart';
+import 'mpeg_recovery_jump.dart';
 import 'raw_video_scan.dart';
 import 'file_identification.dart';
 
@@ -14,7 +15,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-enum RecoveryMode { quickRepair, deepHighQuality, advancedAnalysis }
+enum RecoveryMode { quickRepair, deepHighQuality, pastCrash, advancedAnalysis }
 
 /// Experimental forward-only repair or decode -> re-encode recovery. Never seeks, records
 /// only decoded media streams (not player UI), and never touches the original.
@@ -47,6 +48,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   int? _sessionId;
   int _generation = 0;
   int _frames = 0;
+  int _jumpPercent = 30;
+  MpegJumpResult? _lastJump;
   String? _diagnostic;
   Duration _processed = Duration.zero;
   Timer? _segmentTimer;
@@ -192,7 +195,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           'Reopen it with the file picker before retrying.');
       return;
     }
-    if (_mode == RecoveryMode.deepHighQuality && Platform.isAndroid) {
+    if ((_mode == RecoveryMode.deepHighQuality || _mode == RecoveryMode.pastCrash) && Platform.isAndroid) {
       try {
         const storage = MethodChannel('droid_vid_player/storage');
         final available = await storage.invokeMethod<int>('availableBytes');
@@ -214,6 +217,22 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         return;
       }
     }
+    MpegJumpResult? byteJump;
+    if (_mode == RecoveryMode.pastCrash) {
+      if (!{'.mpg', '.mpeg', '.vob'}.contains(
+          p.extension(widget.sourcePath).toLowerCase())) {
+        if (mounted) setState(() => _error =
+            'Recover Past Crash supports MPEG program streams only.');
+        return;
+      }
+      try {
+        byteJump = await MpegRecoveryJump.locate(widget.sourcePath,
+            percent: _jumpPercent);
+      } catch (error) {
+        if (mounted) setState(() => _error = '$error');
+        return;
+      }
+    }
     if (!mounted) return;
     final generation = ++_generation;
     setState(() {
@@ -226,6 +245,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       _error = null;
       _sessionId = null;
       _frames = 0;
+      _lastJump = byteJump;
       _diagnostic = null;
       _processed = Duration.zero;
       _segmentCount = 0;
@@ -244,7 +264,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       final baseName = cleanBase.isEmpty ? 'video' :
           (cleanBase.length > 48 ? cleanBase.substring(0, 48) : cleanBase);
       final suffix = _mode == RecoveryMode.quickRepair
-          ? 'quick_repair' : 'deep_high_quality';
+          ? 'quick_repair' : _mode == RecoveryMode.pastCrash
+              ? 'past_crash_${_jumpPercent}pct' : 'deep_high_quality';
       final stem = '${baseName}_${suffix}_${DateTime.now().millisecondsSinceEpoch}';
       // Preserve MPEG-2/MP2 codecs in MKV for lossless Quick Repair.
       // Deep Recovery continues re-encoding to a new MP4.
@@ -282,6 +303,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         '-fflags', '+genpts+discardcorrupt',
         '-err_detect', 'ignore_err',
         '-threads', '2',
+        if (byteJump != null) ...[
+          '-skip_initial_bytes', '${byteJump.alignedByte}', '-f', 'mpeg',
+        ],
         '-i', widget.sourcePath,
         '-map', '0:v:0', '-map', '0:a:0?',
         '-sn', '-dn',
@@ -373,6 +397,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         'Droid Vid Player sequential recovery (experimental)\n'
         'Mode: ${_mode == RecoveryMode.quickRepair ? 'Quick Repair' : 'Deep High Quality'}\n'
         'Source: ${widget.sourcePath}\n'
+        'Byte jump: ${_lastJump?.alignedByte ?? 0} bytes\n'
         'Output: $finalPath\n'
         'Exit code: ${code?.toString() ?? 'none'}\n'
         'Cancelled: $_cancelling\n'
@@ -575,7 +600,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 else ...[
                   Text('Processed output time: ${_duration(_processed)}'
                        '  ·  Frames: $_frames'),
-                  if (_mode == RecoveryMode.deepHighQuality) ...[
+                  if (_mode == RecoveryMode.deepHighQuality ||
+                       _mode == RecoveryMode.pastCrash) ...[
                     Text('Segments created: $_segmentCount · '
                         'Earlier segments closed: $_closedSegments'),
                     if (_latestSegment != null)
