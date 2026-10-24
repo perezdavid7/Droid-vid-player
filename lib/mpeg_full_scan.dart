@@ -65,9 +65,13 @@ class MpegFullScan {
       final base = bytesRead - tail.length;
       for (var i = 0; i + 8 < data.length; i++) {
         if (data[i] != 0 || data[i + 1] != 0 ||
-            data[i + 2] != 1 || data[i + 3] != 0xba) continue;
+            data[i + 2] != 1 || data[i + 3] != 0xba) {
+          continue;
+        }
         final header = data[i + 4];
-        if ((header & 0xc4 != 0x44) && (header & 0xf0 != 0x20)) continue;
+        if ((header & 0xc4 != 0x44) && (header & 0xf0 != 0x20)) {
+          continue;
+        }
         final offset = base + i;
         if (offset < 0 || offset >= length) continue;
         final window = windows[offset ~/ windowBytes];
@@ -106,10 +110,11 @@ class MpegFullScan {
         if (end - start >= 64 * 1024) {
           await copyByteRange(file, probeFile, start, end,
               isCancelled: isCancelled);
-          final streams = <String>[
-            if (lastStream != null) lastStream,
-            for (var i = 0; i < 4; i++) '0:v:$i',
-          ].toSet();
+          final streams = <String>{};
+          if (lastStream != null) {
+            streams.add(lastStream);
+          }
+          streams.addAll({'0:v:0', '0:v:1', '0:v:2', '0:v:3'});
           for (final stream in streams) {
             if (isCancelled()) throw const MpegScanCancelled();
             if (await _decodesThreeFrames(probeFile.path, stream)) {
