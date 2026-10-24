@@ -32,6 +32,8 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   final _files = <String>[];
   VideoPlayerController? _video;
   int _index = 0;
+  RecoveryListTab _savedRecoveryTab = RecoveryListTab.all;
+  bool _openedFromRecoveries = false;
   int _fileGeneration = 0;
   bool _loading = false;
   bool _controlsVisible = true;
@@ -245,6 +247,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
         }
         return;
       }
+      _openedFromRecoveries = false;
       _files..clear()..addAll(paths);
       _index = 0;
       await _openFile();
@@ -818,13 +821,19 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   }
 
   Future<void> _savedRecoveries() async {
-    final file = await Navigator.of(context).push<String>(
-      MaterialPageRoute<String>(
-        builder: (_) => const SavedRecoveriesScreen(),
+    // The selected tab is retained even when the list route is closed to
+    // hand the requested file to the primary player.
+    await _video?.pause();
+    if (!mounted) return;
+    final pick = await Navigator.of(context).push<SavedRecoveryPick>(
+      MaterialPageRoute<SavedRecoveryPick>(
+        builder: (_) => SavedRecoveriesScreen(initialTab: _savedRecoveryTab),
       ),
     );
-    if (!mounted || file == null || !await File(file).exists()) return;
-    _files..clear()..add(file);
+    if (!mounted || pick == null || !await File(pick.path).exists()) return;
+    _savedRecoveryTab = pick.tab;
+    _openedFromRecoveries = true;
+    _files..clear()..add(pick.path);
     _index = 0;
     await _openFile();
   }
@@ -931,7 +940,14 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       child: ColoredBox(
         color: Colors.black.withValues(alpha: 0.65),
         child: Row(children: [
-          const SizedBox(width: 12),
+          if (_openedFromRecoveries)
+            IconButton(
+              tooltip: 'Back to ${_savedRecoveryTab.name} tab',
+              onPressed: () => unawaited(_savedRecoveries()),
+              icon: const Icon(Icons.arrow_back),
+            )
+          else
+            const SizedBox(width: 12),
           Expanded(child: Text(p.basename(_source ?? 'Droid Vid Player'),
             maxLines: 1, overflow: TextOverflow.ellipsis)),
           IconButton(
@@ -1058,7 +1074,14 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   @override
   Widget build(BuildContext context) {
     final hasFile = _source != null;
-    return Scaffold(
+    return PopScope(
+      canPop: !_openedFromRecoveries,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _openedFromRecoveries) {
+          unawaited(_savedRecoveries());
+        }
+      },
+      child: Scaffold(
       backgroundColor: Colors.black,
       appBar: !hasFile && !_fullScreen
           ? AppBar(title: const Text('Droid Vid Player V2')) : null,
@@ -1142,6 +1165,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
                 style: const TextStyle(color: Colors.amberAccent))),
         ],
       )),
+      ),
     );
   }
 }
