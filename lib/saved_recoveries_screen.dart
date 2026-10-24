@@ -543,22 +543,14 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     final segmentCount = paths.where(isSegment).length;
     final otherVideos = paths.where((x) =>
         isVideoFile(x) && !isSegment(x)).length;
-    final reports = paths.length - segmentCount - otherVideos;
+    final reportCount = paths.length - segmentCount - otherVideos;
     final runStems = paths.where(isSegment).map(segmentRun).toSet().toList()
-      ..sort((a, b) {
-        final byTime = runTimestamp(b).compareTo(runTimestamp(a));
-        return byTime == 0 ? b.compareTo(a) : byTime;
-      });
+      ..sort((a, b) => runTimestamp(b).compareTo(runTimestamp(a)));
     final runNumbers = <String, int>{
       for (var i = 0; i < runStems.length; i++)
         runStems[i]: runStems.length - i,
     };
-    final runCounts = <String, int>{
-      for (final stem in runStems)
-        stem: paths.where((x) => isSegment(x) &&
-            segmentRun(x) == stem).length,
-    };
-    final visible = List<int>.generate(paths.length, (index) => index)
+    final visible = List<int>.generate(paths.length, (i) => i)
         .where((i) {
           final path = paths[i];
           switch (_view) {
@@ -571,265 +563,249 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
         }).toList();
     if (_view == _RecoveryView.segments) {
       visible.sort((a, b) {
-        final groupA = runNumbers[segmentRun(paths[a])] ?? 0;
-        final groupB = runNumbers[segmentRun(paths[b])] ?? 0;
-        final compared = groupB.compareTo(groupA);
-        return compared == 0
-            ? segmentOrdinal(paths[a]).compareTo(segmentOrdinal(paths[b]))
-            : compared;
+        final order = (runNumbers[segmentRun(paths[b])] ?? 0)
+            .compareTo(runNumbers[segmentRun(paths[a])] ?? 0);
+        return order != 0 ? order :
+            segmentOrdinal(paths[a]).compareTo(segmentOrdinal(paths[b]));
       });
     } else {
       visible.sort((a, b) => stats[b].modified.compareTo(stats[a].modified));
     }
     return Scaffold(
-      appBar: AppBar(title: const Text('Saved Recoveries'), actions: [
-        IconButton(
-          tooltip: 'Refresh',
-          onPressed: busy || loading ? null : refresh,
-          icon: const Icon(Icons.refresh),
-        ),
-      ]),
-      body: Column(children: [
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            Text('Files: ${paths.length} · Total: ${size(total)}'),
-            const Text('Files are only deleted when you choose Delete and confirm. '
-                'Partial videos may still contain recoverable footage.'),
-            if (segmentCount > 0)
-              FilledButton.icon(
-                onPressed: busy ? null : () async {
-                  final segments = paths.where(isSegment).toList()..sort();
-                  final groups = runStems;
-                  if (!mounted) return;
-                  final chosen = await showDialog<String>(
-                    context: context,
-                    builder: (ctx) => SimpleDialog(
-                      title: const Text('Select recovery run'),
-                      children: [
-                        for (final stem in groups)
-                          SimpleDialogOption(
-                            onPressed: () => Navigator.pop(ctx, stem),
-                            child: Text('Attempt ${runNumbers[stem]} · '
-                                '${runDate(stem)} · '
-                                '${runCounts[stem]} segments'),
-                          ),
-                      ],
-                    ),
-                  );
-                  if (!context.mounted || chosen == null) return;
-                  await Navigator.push<void>(context,
-                    MaterialPageRoute<void>(builder: (_) =>
-                      ReconstructionEditor(segmentPaths: segments
-                          .where((x) => x.startsWith('$chosen.segment_')).toList())));
-                  if (mounted) unawaited(refresh());
-                },
-                icon: const Icon(Icons.movie_edit),
-                label: const Text('Reconstruct Recordings'),
-              ),
-            const SizedBox(height: 8),
-            Wrap(spacing: 6, runSpacing: 4, children: [
-              ChoiceChip(
-                label: Text('All (${paths.length})'),
-                selected: _view == _RecoveryView.all,
-                onSelected: (_) => setState(() { _view = _RecoveryView.all; _selectedPaths.clear(); }),
-              ),
-              ChoiceChip(
-                label: Text('Segments ($segmentCount)'),
-                selected: _view == _RecoveryView.segments,
-                onSelected: (_) => setState(() { _view = _RecoveryView.segments; _selectedPaths.clear(); }),
-              ),
-              ChoiceChip(
-                label: Text('Other videos ($otherVideos)'),
-                selected: _view == _RecoveryView.otherVideos,
-                onSelected: (_) => setState(() { _view = _RecoveryView.otherVideos; _selectedPaths.clear(); }),
-              ),
-              ChoiceChip(
-                label: Text('Logs & reports ($reports)'),
-                selected: _view == _RecoveryView.reports,
-                onSelected: (_) => setState(() { _view = _RecoveryView.reports; _selectedPaths.clear(); }),
-              ),
-            ]),
-            Text('Showing ${visible.length} of ${paths.length} saved files',
-                style: Theme.of(context).textTheme.bodySmall),
-            Row(children: [
-              TextButton.icon(
-                onPressed: busy || loading ? null : () => setState(() {
-                  _selecting = !_selecting;
-                  if (!_selecting) _selectedPaths.clear();
-                }),
-                icon: Icon(_selecting ? Icons.close : Icons.checklist),
-                label: Text(_selecting ? 'Done selecting' : 'Select files'),
-              ),
-              if (_selecting)
-                TextButton(
-                  onPressed: busy || loading ? null : () => setState(() {
-                    _selectedPaths.addAll(visible.map((i) => paths[i]));
-                  }),
-                  child: const Text('Select visible'),
+      appBar: AppBar(
+        title: const Text('Saved Recoveries'),
+        actions: [
+          IconButton(
+            tooltip: 'Refresh files',
+            onPressed: busy || loading ? null : refresh,
+            icon: const Icon(Icons.refresh),
+          ),
+          PopupMenuButton<_SavedMenuAction>(
+            tooltip: 'Recovery tools',
+            onSelected: (action) {
+              switch (action) {
+                case _SavedMenuAction.reconstruct:
+                  unawaited(_reconstructRecordings());
+                case _SavedMenuAction.diagnostics:
+                  unawaited(_showDiagnostics());
+                case _SavedMenuAction.destination:
+                  unawaited(_showDestination());
+                case _SavedMenuAction.select:
+                  setState(() {
+                    _selecting = !_selecting;
+                    if (!_selecting) _selectedPaths.clear();
+                  });
+              }
+            },
+            itemBuilder: (_) => [
+              if (segmentCount > 0)
+                const PopupMenuItem(
+                  value: _SavedMenuAction.reconstruct,
+                  child: Text('Reconstruct recordings'),
                 ),
-            ]),
-            if (_selecting)
-              Wrap(spacing: 8, crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Text('${_selectedPaths.length} selected'),
-                  TextButton(
-                    onPressed: busy ? null : () => setState(
-                        () => _selectedPaths.clear()),
-                    child: const Text('Clear'),
-                  ),
-                  FilledButton.icon(
-                    onPressed: busy || _selectedPaths.isEmpty ? null :
-                        () => unawaited(_deleteFiles(_selectedPaths.toList())),
-                    icon: const Icon(Icons.delete_outline),
-                    label: const Text('Delete selected'),
-                  ),
-                ],
+              const PopupMenuItem(
+                value: _SavedMenuAction.diagnostics,
+                child: Text('Crash diagnostics'),
               ),
-            if (exitError != null)
-              Text(exitError!, style: const TextStyle(fontSize: 12)),
-            if (lastFatalException != null &&
-                lastFatalException!.isNotEmpty)
-              ExpansionTile(
-                title: const Text('Last fatal exception details'),
-                subtitle: const Text('Crash trace captured on the device'),
-                children: [
-                  SizedBox(height: 250, child: SingleChildScrollView(
-                    child: SelectableText(lastFatalException!),
-                  )),
-                ],
+              const PopupMenuItem(
+                value: _SavedMenuAction.destination,
+                child: Text('Export destination'),
               ),
-            if (exits.isNotEmpty)
-              ExpansionTile(
-                title: const Text('Recent Android process exits'),
-                subtitle: const Text('Check why the app closed'),
-                children: [
-                  SizedBox(height: 180, child: ListView(children: [
-                    for (final item in exits.take(5))
-                      ListTile(
-                        dense: true,
-                        title: Text(exitLabel(
-                            (item['reason'] as num?)?.toInt() ?? -1)),
-                        subtitle: Text(
-                            '${DateTime.fromMillisecondsSinceEpoch((item['timestamp'] as num?)?.toInt() ?? 0).toLocal()}\n'
-                            '${item['description'] ?? ''}',
-                            maxLines: 4),
-                      ),
-                  ])),
-                ],
+              PopupMenuItem(
+                value: _SavedMenuAction.select,
+                child: Text(_selecting ? 'Done selecting' : 'Select files'),
               ),
-            ExpansionTile(
-              title: const Text('Export destination'),
-              subtitle: const Text('Tap to choose or change the folder'),
-              children: [RecoveryDestinationPicker(disabled: busy)],
-            ),
-            if (busy) const LinearProgressIndicator(),
-            if (message != null)
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 160),
-                child: SingleChildScrollView(child: SelectableText(message!)),
-              ),
-          ]),
-        ),
-        Expanded(child: loading
-          ? const Center(child: CircularProgressIndicator())
-          : visible.isEmpty
-            ? const Center(child: Text(
-                'No files found in the private recovery folder. '
-                'Other app data may exist elsewhere.',
-                textAlign: TextAlign.center))
-            : ListView.builder(itemCount: visible.length, itemBuilder: (context, row) {
-                final i = visible[row];
-                final path = paths[i];
-                final name = p.basename(path);
-                final incomplete = name.contains('.partial.') ||
-                    name.contains('.working.');
-                final video = isVideoFile(path);
-                final similar = paths.where((other) =>
-                    sourceGroup(p.basename(other)) == sourceGroup(name)).length;
-                final match = RegExp(r'\.segment_(\d+)\.mkv$')
-                    .firstMatch(name);
-                final segmentNumber = match == null ? null :
-                    (int.tryParse(match.group(1) ?? '') ?? 0) + 1;
-                final checkpoint = name.endsWith('.checkpoint.txt');
-                final run = isSegment(path) ? segmentRun(path) : null;
-                final attempt = run == null ? null : runNumbers[run];
-                final isRunStart = run != null &&
-                    (row == 0 ||
-                        !isSegment(paths[visible[row - 1]]) ||
-                        segmentRun(paths[visible[row - 1]]) != run);
-                return Column(crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (_view == _RecoveryView.segments && isRunStart)
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(8, 16, 8, 6),
-                        child: Text('Recovery attempt $attempt '
-                            '· ${runDate(run)} '
-                            '· ${runCounts[run]} segments',
-                            style: const TextStyle(fontSize: 16,
-                                fontWeight: FontWeight.bold)),
-                      ),
-                    Card(child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    if (segmentNumber != null)
-                      Text('Attempt ${attempt ?? "?"} · '
-                          'Segment $segmentNumber of ${runCounts[run] ?? "?"}',
-                          style: const TextStyle(fontSize: 18,
-                              fontWeight: FontWeight.bold)),
-                    if (_selecting)
-                      CheckboxListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Select this file for deletion'),
-                        value: _selectedPaths.contains(path),
-                        onChanged: busy ? null :
-                            (_) => _toggleSelection(path),
-                      ),
-                    Text(name, maxLines: 2, overflow: TextOverflow.ellipsis),
-                    Text('${size(stats[i].size)}'
-                        '${incomplete ? ' · Incomplete/working' : ' · Saved'}'
-                        '${video ? '' : ' · Non-video'}'),
-                    if (similar > 1)
-                      Text('$similar saved files share this source name; '
-                          'these are not confirmed duplicates.'),
-                    Wrap(spacing: 6, children: [
-                      if (checkpoint)
-                        OutlinedButton(
-                          onPressed: busy ? null : () => readCheckpoint(path),
-                          child: const Text('View checkpoint'),
-                        ),
-                      OutlinedButton(
-                        onPressed: busy || !video ? null : () => verify(path),
-                        child: const Text('Verify sample'),
-                      ),
-                      OutlinedButton(
-                        onPressed: busy || !video ? null :
-                            () => inspectBytes(path),
-                        child: const Text('Inspect bytes'),
-                      ),
-                      OutlinedButton(
-                        onPressed: busy || !video ? null :
-                            () => Navigator.of(context).pop(path),
-                        child: const Text('Play'),
-                      ),
-                      FilledButton.tonal(
-                        onPressed: busy || !video ? null : () => export(path),
-                        child: const Text('Export'),
-                      ),
-                      if (!_selecting)
-                        OutlinedButton.icon(
-                          onPressed: busy ? null :
-                              () => unawaited(_deleteFiles([path])),
-                          icon: const Icon(Icons.delete_outline),
-                          label: const Text('Delete'),
-                        ),
-                    ]),
+            ],
+          ),
+        ],
+      ),
+      // One unified scrolling viewport: headers, segment cards and controls
+      // all travel together, rather than trapping files in a short list.
+      body: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('${paths.length} files · ${size(total)}',
+                    style: Theme.of(context).textTheme.bodyMedium),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(children: [
+                    ChoiceChip(
+                      label: Text('All (${paths.length})'),
+                      selected: _view == _RecoveryView.all,
+                      onSelected: (_) => _setView(_RecoveryView.all),
+                    ),
+                    const SizedBox(width: 6),
+                    ChoiceChip(
+                      label: Text('Segments ($segmentCount)'),
+                      selected: _view == _RecoveryView.segments,
+                      onSelected: (_) => _setView(_RecoveryView.segments),
+                    ),
+                    const SizedBox(width: 6),
+                    ChoiceChip(
+                      label: Text('Other videos ($otherVideos)'),
+                      selected: _view == _RecoveryView.otherVideos,
+                      onSelected: (_) => _setView(_RecoveryView.otherVideos),
+                    ),
+                    const SizedBox(width: 6),
+                    ChoiceChip(
+                      label: Text('Reports ($reportCount)'),
+                      selected: _view == _RecoveryView.reports,
+                      onSelected: (_) => _setView(_RecoveryView.reports),
+                    ),
                   ]),
-                )),
-                  ],
-                );
-              })),
-      ]),
+                ),
+                if (busy) const LinearProgressIndicator(),
+                if (message != null)
+                  ExpansionTile(
+                    initiallyExpanded: true,
+                    tilePadding: EdgeInsets.zero,
+                    title: const Text('Last operation result'),
+                    children: [
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxHeight: 180),
+                        child: SingleChildScrollView(
+                          child: SelectableText(message!),
+                        ),
+                      ),
+                    ],
+                  ),
+                if (_selecting)
+                  Wrap(spacing: 6, crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text('${_selectedPaths.length} selected'),
+                      TextButton(
+                        onPressed: busy ? null : () => setState(() =>
+                            _selectedPaths.addAll(visible.map((i) => paths[i]))),
+                        child: const Text('Select shown'),
+                      ),
+                      TextButton(
+                        onPressed: busy ? null : () => setState(
+                            () => _selectedPaths.clear()),
+                        child: const Text('Clear'),
+                      ),
+                      FilledButton.icon(
+                        onPressed: busy || _selectedPaths.isEmpty ? null :
+                            () => unawaited(_deleteFiles(_selectedPaths.toList())),
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Delete'),
+                      ),
+                    ],
+                  ),
+              ],
+            ),
+          )),
+          if (loading)
+            const SliverFillRemaining(child: Center(
+              child: CircularProgressIndicator(),
+            ))
+          else if (visible.isEmpty)
+            const SliverFillRemaining(child: Center(
+              child: Text('No files in this category.'),
+            ))
+          else SliverList.builder(
+            itemCount: visible.length,
+            itemBuilder: (ctx, index) {
+              final fileIndex = visible[index];
+              final path = paths[fileIndex];
+              final name = p.basename(path);
+              final video = isVideoFile(path);
+              final segment = isSegment(path);
+              final run = segment ? segmentRun(path) : null;
+              final number = segmentOrdinal(path) + 1;
+              final runNumber = run == null ? null : runNumbers[run];
+              final header = segment && _view == _RecoveryView.segments &&
+                  (index == 0 ||
+                    segmentRun(paths[visible[index - 1]]) != run);
+              final fileIsCheckpoint = name.endsWith('.checkpoint.txt');
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (header)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(14, 12, 8, 4),
+                      child: Text('Attempt $runNumber · ${runDate(run!)}',
+                        style: Theme.of(context).textTheme.titleSmall),
+                    ),
+                  Card(
+                    margin: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 3),
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(10, 4, 4, 4),
+                      child: Row(children: [
+                        if (_selecting)
+                          Checkbox(
+                            value: _selectedPaths.contains(path),
+                            onChanged: busy ? null :
+                                (_) => _toggleSelection(path),
+                          ),
+                        Expanded(child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(segment
+                                ? 'Attempt $runNumber · Segment $number'
+                                : name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontWeight: FontWeight.w600)),
+                            Text('${size(stats[fileIndex].size)}'
+                                ' · ${segment ? "Recovered segment" :
+                                  video ? "Video" : "Report"}',
+                                style: Theme.of(context).textTheme.bodySmall),
+                            if (segment)
+                              Text(name,
+                                maxLines: 1, overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.labelSmall),
+                          ],
+                        )),
+                        if (video && !_selecting)
+                          IconButton(
+                            tooltip: 'Play video',
+                            onPressed: busy ? null : () =>
+                                Navigator.of(context).pop(path),
+                            icon: const Icon(Icons.play_arrow),
+                          ),
+                        PopupMenuButton<_FileAction>(
+                          tooltip: 'File actions',
+                          enabled: !busy,
+                          onSelected: (action) => _fileAction(action, path),
+                          itemBuilder: (_) => [
+                            if (video)
+                              const PopupMenuItem(
+                                value: _FileAction.play, child: Text('Play')),
+                            if (video)
+                              const PopupMenuItem(
+                                value: _FileAction.verify,
+                                child: Text('Verify sample')),
+                            if (video)
+                              const PopupMenuItem(
+                                value: _FileAction.inspect,
+                                child: Text('Inspect bytes')),
+                            if (video)
+                              const PopupMenuItem(
+                                value: _FileAction.export,
+                                child: Text('Export')),
+                            if (fileIsCheckpoint)
+                              const PopupMenuItem(
+                                value: _FileAction.readReport,
+                                child: Text('View checkpoint')),
+                            const PopupMenuItem(
+                              value: _FileAction.delete,
+                              child: Text('Delete…')),
+                          ],
+                        ),
+                      ]),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+          const SliverToBoxAdapter(child: SizedBox(height: 56)),
+        ],
+      ),
     );
   }
 }
