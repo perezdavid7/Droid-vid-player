@@ -629,7 +629,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                       Padding(
                         padding: const EdgeInsets.fromLTRB(8, 16, 8, 6),
                         child: Text('Recovery attempt $attempt '
-                            '· ${runDate(run!)} '
+                            '· ${runDate(run)} '
                             '· ${runCounts[run]} segments',
                             style: const TextStyle(fontSize: 16,
                                 fontWeight: FontWeight.bold)),
