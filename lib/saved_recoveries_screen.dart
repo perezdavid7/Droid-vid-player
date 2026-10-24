@@ -11,12 +11,23 @@ import 'recovery_destination.dart';
 import 'raw_video_scan.dart';
 import 'reconstruction_editor.dart';
 
-enum _RecoveryView { all, segments, otherVideos, reports }
+enum RecoveryListTab { all, segments, otherVideos, reports }
+
+/// Returning the selected tab with the video prevents Saved Recoveries from
+/// silently switching back to All when the player is closed.
+class SavedRecoveryPick {
+  final String path;
+  final RecoveryListTab tab;
+  const SavedRecoveryPick({required this.path, required this.tab});
+}
 enum _SavedMenuAction { reconstruct, diagnostics, destination, select }
 enum _FileAction { play, verify, inspect, export, readReport, delete }
 
 class SavedRecoveriesScreen extends StatefulWidget {
-  const SavedRecoveriesScreen({super.key});
+  const SavedRecoveriesScreen({
+    super.key, this.initialTab = RecoveryListTab.all,
+  });
+  final RecoveryListTab initialTab;
   @override
   State<SavedRecoveriesScreen> createState() => _SavedRecoveriesScreenState();
 }
@@ -29,7 +40,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   bool _exporting = false;
   String? _exportTarget;
   String? message;
-  _RecoveryView _view = _RecoveryView.all;
+  late RecoveryListTab _view;
   bool _selecting = false;
   final Set<String> _selectedPaths = {};
   List<Map<String, dynamic>> exits = [];
@@ -39,6 +50,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   @override
   void initState() {
     super.initState();
+    _view = widget.initialTab;
     unawaited(refresh());
     unawaited(loadExits());
   }
@@ -525,7 +537,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
   }
 
 
-  void _setView(_RecoveryView next) {
+  void _setView(RecoveryListTab next) {
     setState(() {
       _view = next;
       _selectedPaths.clear();
@@ -643,7 +655,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     if (busy) return;
     switch (action) {
       case _FileAction.play:
-        Navigator.of(context).pop(path);
+        Navigator.of(context).pop(SavedRecoveryPick(path: path, tab: _view));
       case _FileAction.verify:
         unawaited(verify(path));
       case _FileAction.inspect:
@@ -674,14 +686,14 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
         .where((i) {
           final path = paths[i];
           switch (_view) {
-            case _RecoveryView.all: return true;
-            case _RecoveryView.segments: return isSegment(path);
-            case _RecoveryView.otherVideos:
+            case RecoveryListTab.all: return true;
+            case RecoveryListTab.segments: return isSegment(path);
+            case RecoveryListTab.otherVideos:
               return isVideoFile(path) && !isSegment(path);
-            case _RecoveryView.reports: return !isVideoFile(path);
+            case RecoveryListTab.reports: return !isVideoFile(path);
           }
         }).toList();
-    if (_view == _RecoveryView.segments) {
+    if (_view == RecoveryListTab.segments) {
       visible.sort((a, b) {
         final order = (runNumbers[segmentRun(paths[b])] ?? 0)
             .compareTo(runNumbers[segmentRun(paths[a])] ?? 0);
@@ -766,26 +778,26 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                   child: Row(children: [
                     ChoiceChip(
                       label: Text('All (${paths.length})'),
-                      selected: _view == _RecoveryView.all,
-                      onSelected: (_) => _setView(_RecoveryView.all),
+                      selected: _view == RecoveryListTab.all,
+                      onSelected: (_) => _setView(RecoveryListTab.all),
                     ),
                     const SizedBox(width: 6),
                     ChoiceChip(
                       label: Text('Segments ($segmentCount)'),
-                      selected: _view == _RecoveryView.segments,
-                      onSelected: (_) => _setView(_RecoveryView.segments),
+                      selected: _view == RecoveryListTab.segments,
+                      onSelected: (_) => _setView(RecoveryListTab.segments),
                     ),
                     const SizedBox(width: 6),
                     ChoiceChip(
                       label: Text('Other videos ($otherVideos)'),
-                      selected: _view == _RecoveryView.otherVideos,
-                      onSelected: (_) => _setView(_RecoveryView.otherVideos),
+                      selected: _view == RecoveryListTab.otherVideos,
+                      onSelected: (_) => _setView(RecoveryListTab.otherVideos),
                     ),
                     const SizedBox(width: 6),
                     ChoiceChip(
                       label: Text('Reports ($reportCount)'),
-                      selected: _view == _RecoveryView.reports,
-                      onSelected: (_) => _setView(_RecoveryView.reports),
+                      selected: _view == RecoveryListTab.reports,
+                      onSelected: (_) => _setView(RecoveryListTab.reports),
                     ),
                   ]),
                 ),
@@ -848,7 +860,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
               final run = segment ? segmentRun(path) : null;
               final number = segmentOrdinal(path) + 1;
               final runNumber = run == null ? null : runNumbers[run];
-              final header = segment && _view == _RecoveryView.segments &&
+              final header = segment && _view == RecoveryListTab.segments &&
                   (index == 0 ||
                     segmentRun(paths[visible[index - 1]]) != run);
               final fileIsCheckpoint = name.endsWith('.checkpoint.txt');
@@ -896,7 +908,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                           IconButton(
                             tooltip: 'Play video',
                             onPressed: busy ? null : () =>
-                                Navigator.of(context).pop(path),
+                                Navigator.of(context).pop(SavedRecoveryPick(path: path, tab: _view)),
                             icon: const Icon(Icons.play_arrow),
                           ),
                         PopupMenuButton<_FileAction>(
