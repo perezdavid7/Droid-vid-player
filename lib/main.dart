@@ -24,13 +24,16 @@ class DroidVidPlayer extends StatelessWidget {
     title: 'Droid Vid Player',
     theme: ThemeData.dark(useMaterial3: true),
     home: Platform.isAndroid
-        ? AndroidV2Player(legacyBuilder: (_, source) => const PlayerScreen())
+        ? AndroidV2Player(
+            legacyBuilder: (_, source) => PlayerScreen(initialSourcePath: source),
+          )
         : const PlayerScreen(),
   );
 }
 
 class PlayerScreen extends StatefulWidget {
-  const PlayerScreen({super.key});
+  final String? initialSourcePath;
+  const PlayerScreen({super.key, this.initialSourcePath});
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
@@ -237,6 +240,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       });
       _scheduleAutoHide();
     });
+    final initialSource = widget.initialSourcePath;
+    if (initialSource != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(load([initialSource]));
+      });
+    }
   }
 
   void _scheduleAutoHide() {
