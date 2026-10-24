@@ -221,15 +221,19 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
     if (_mode == RecoveryMode.pastCrash) {
       if (!{'.mpg', '.mpeg', '.vob'}.contains(
           p.extension(widget.sourcePath).toLowerCase())) {
-        if (mounted) setState(() => _error =
-            'Recover Past Crash supports MPEG program streams only.');
+        if (mounted) {
+          setState(() => _error =
+              'Recover Past Crash supports MPEG program streams only.');
+        }
         return;
       }
       try {
         byteJump = await MpegRecoveryJump.locate(widget.sourcePath,
             percent: _jumpPercent);
       } catch (error) {
-        if (mounted) setState(() => _error = '$error');
+        if (mounted) {
+          setState(() => _error = '$error');
+        }
         return;
       }
     }
