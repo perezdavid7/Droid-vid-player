@@ -497,23 +497,22 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
               ChoiceChip(
                 label: Text('All (${paths.length})'),
                 selected: _view == _RecoveryView.all,
-                onSelected: (_) => setState(() => _view = _RecoveryView.all),
+                onSelected: (_) => setState(() { _view = _RecoveryView.all; _selectedPaths.clear(); }),
               ),
               ChoiceChip(
                 label: Text('Segments ($segmentCount)'),
                 selected: _view == _RecoveryView.segments,
-                onSelected: (_) => setState(() => _view = _RecoveryView.segments),
+                onSelected: (_) => setState(() { _view = _RecoveryView.segments; _selectedPaths.clear(); }),
               ),
               ChoiceChip(
                 label: Text('Other videos ($otherVideos)'),
                 selected: _view == _RecoveryView.otherVideos,
-                onSelected: (_) => setState(
-                    () => _view = _RecoveryView.otherVideos),
+                onSelected: (_) => setState(() { _view = _RecoveryView.otherVideos; _selectedPaths.clear(); }),
               ),
               ChoiceChip(
                 label: Text('Logs & reports ($reports)'),
                 selected: _view == _RecoveryView.reports,
-                onSelected: (_) => setState(() => _view = _RecoveryView.reports),
+                onSelected: (_) => setState(() { _view = _RecoveryView.reports; _selectedPaths.clear(); }),
               ),
             ]),
             Text('Showing ${visible.length} of ${paths.length} saved files',
