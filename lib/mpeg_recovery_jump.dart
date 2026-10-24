@@ -17,8 +17,8 @@ class MpegRecoveryJump {
     required int percent,
     int extraBytes = 0,
   }) async {
-    if (percent < 10 || percent > 90) {
-      throw ArgumentError.value(percent, 'percent', 'Must be 10–90');
+    if (percent < 0 || percent >= 100) {
+      throw ArgumentError.value(percent, 'percent', 'Must be 0–99');
     }
     final file = File(path);
     final size = await file.length();
@@ -112,8 +112,80 @@ class MpegRecoveryJump {
         'Probe results: ${diagnostics.take(5).join(" | ")}');
   }
 
+
+  /// Samples the entire physical file at each 1% byte position.
+  /// Positive samples prove short playable spans, not every intervening byte.
+  static Future<List<MpegFullScanRegion>> scanEntireFile(
+    String path, {
+    required bool Function() isCancelled,
+    void Function(double fraction, String message)? onProgress,
+  }) async {
+    final bytes = await File(path).length();
+    if (bytes < 1024 * 1024) {
+      throw StateError('MPEG source is too small to scan.');
+    }
+    final hits = <({int percent, int byte, String stream})>[];
+    String? preferredStream;
+    for (var percent = 0; percent < 100; percent++) {
+      if (isCancelled()) return [];
+      onProgress?.call(percent / 100,
+          'Scanning $percent% of source bytes · ${hits.length} playable samples.');
+      try {
+        final jump = await locate(path, percent: percent);
+        final candidates = <String>[
+          if (preferredStream != null) preferredStream,
+          for (var i = 0; i < 4; i++) '0:v:$i',
+        ].toSet();
+        for (final stream in candidates) {
+          if (isCancelled()) return [];
+          final result = await _testFrames(
+            path, jump.alignedByte, stream,
+            timeout: const Duration(seconds: 8),
+          );
+          if (result.ok) {
+            hits.add((percent: percent, byte: jump.alignedByte, stream: stream));
+            preferredStream = stream;
+            break;
+          }
+        }
+      } catch (_) {
+        // A failed position never stops the remaining scan.
+      }
+      onProgress?.call((percent + 1) / 100,
+          'Scanned ${percent + 1}% · ${hits.length} playable samples.');
+    }
+    if (isCancelled() || hits.isEmpty) return [];
+    final regions = <MpegFullScanRegion>[];
+    var start = 0;
+    for (var i = 1; i <= hits.length; i++) {
+      final split = i == hits.length ||
+          hits[i].percent != hits[i - 1].percent + 1 ||
+          hits[i].stream != hits[i - 1].stream;
+      if (!split) continue;
+      final first = hits[start];
+      final last = hits[i - 1];
+      final endPercent = math.min(100, last.percent + 1);
+      final endByte = math.min(bytes, bytes ~/ 100 * endPercent +
+          (bytes % 100) * endPercent ~/ 100);
+      if (endByte > first.byte) {
+        regions.add(MpegFullScanRegion(
+          fromPercent: first.percent,
+          throughPercent: endPercent,
+          startByte: first.byte,
+          endByte: endByte,
+          stream: first.stream,
+          playableSamples: i - start,
+        ));
+      }
+      start = i;
+    }
+    return regions;
+  }
+
   static Future<({bool ok, String reason})> _testFrames(
-      String path, int offset, String stream) async {
+      String path, int offset, String stream, {
+        Duration timeout = const Duration(seconds: 20),
+      }) async {
     final done = Completer<void>();
     int? sessionId;
     try {
@@ -136,7 +208,7 @@ class MpegRecoveryJump {
         if (!done.isCompleted) done.complete();
       });
       sessionId = session.getSessionId();
-      await done.future.timeout(const Duration(seconds: 20));
+      await done.future.timeout(timeout);
       final code = await session.getReturnCode();
       final logs = await session.getLogsAsString();
       final decoded = RegExp(r'showinfo.*\bn:\s*\d+').hasMatch(logs);
@@ -156,7 +228,7 @@ class MpegRecoveryJump {
               0, math.min(lines.last.trim().length, 120)));
     } on TimeoutException {
       if (sessionId != null) await FFmpegKit.cancel(sessionId);
-      return (ok: false, reason: '20-second probe timeout');
+      return (ok: false, reason: 'Decode probe timeout');
     } catch (error) {
       return (ok: false, reason: '$error');
     }
@@ -180,4 +252,27 @@ class MpegJumpResult {
     required this.requestedByte,
     required this.alignedByte,
   });
+}
+
+ 
+/// A byte range with independently verified playable probe positions.
+/// Boundaries are estimates; recovered clips still require review.
+class MpegFullScanRegion {
+  final int fromPercent;
+  final int throughPercent;
+  final int startByte;
+  final int endByte;
+  final String stream;
+  final int playableSamples;
+
+  const MpegFullScanRegion({
+    required this.fromPercent,
+    required this.throughPercent,
+    required this.startByte,
+    required this.endByte,
+    required this.stream,
+    required this.playableSamples,
+  });
+
+  int get length => endByte - startByte;
 }
