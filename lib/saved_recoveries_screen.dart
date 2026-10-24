@@ -244,6 +244,164 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     }
   }
 
+
+  /// Segment files referenced by saved reconstruction edit decisions.
+  Future<Set<String>> _projectReferences() async {
+    final base = await getApplicationDocumentsDirectory();
+    final dir = Directory(p.join(base.path, 'DroidVidRecoveryProjects'));
+    if (!await dir.exists()) return <String>{};
+    final referenced = <String>{};
+    await for (final item in dir.list(followLinks: false)) {
+      if (item is! File || !item.path.endsWith('.reconstruction.json')) {
+        continue;
+      }
+      try {
+        final json = jsonDecode(await item.readAsString());
+        if (json is! Map || json['pieces'] is! List) {
+          throw const FormatException('Missing reconstruction pieces');
+        }
+        for (final part in json['pieces'] as List) {
+          if (part is Map && part['path'] is String) {
+            referenced.add(p.normalize(part['path'] as String));
+          }
+        }
+      } catch (error) {
+        throw StateError('Cannot check reconstruction project '
+            '${p.basename(item.path)}: $error. '
+            'Deletion was stopped to protect recovered footage.');
+      }
+    }
+    return referenced;
+  }
+
+  Future<void> _deleteFiles(List<String> requested) async {
+    if (busy || requested.isEmpty) return;
+    final allowed = paths.toSet();
+    final files = requested.where(allowed.contains).toSet().toList();
+    if (files.isEmpty) return;
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      final directory = p.normalize(p.join(docs.path, 'DroidVidRecoveries'));
+      final references = await _projectReferences();
+      var bytes = 0;
+      var linked = 0;
+      final verified = <String>[];
+      for (final path in files) {
+        final normalized = p.normalize(path);
+        if (p.dirname(normalized) != directory) {
+          throw StateError('Deletion is restricted to the saved recovery folder.');
+        }
+        final file = File(normalized);
+        final stat = await file.stat();
+        if (stat.type != FileSystemEntityType.file) {
+          throw StateError('Unable to delete a non-regular file: '
+              '${p.basename(normalized)}');
+        }
+        verified.add(normalized);
+        bytes += stat.size;
+        if (references.contains(normalized)) linked++;
+      }
+      if (!mounted) return;
+      var acknowledgeLinks = false;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialog) => StatefulBuilder(
+          builder: (ctx, redraw) => AlertDialog(
+            title: Text('Delete ${verified.length} saved '
+                '${verified.length == 1 ? "file" : "files"}?'),
+            content: SingleChildScrollView(child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Space to free: ${size(bytes)}.'),
+                const SizedBox(height: 8),
+                const Text('These files will be permanently removed from '
+                    'the app. This cannot be undone. It will not delete '
+                    'the original source video or exported folder copies.'),
+                const SizedBox(height: 8),
+                for (final path in verified.take(4))
+                  Text('• ${p.basename(path)}',
+                      maxLines: 2, overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12)),
+                if (verified.length > 4)
+                  Text('…and ${verified.length - 4} more files'),
+                if (linked > 0) ...[
+                  const SizedBox(height: 12),
+                  Text('Warning: $linked selected '
+                      '${linked == 1 ? "file is" : "files are"} used by '
+                      'saved reconstruction projects. Those edits may no '
+                      'longer play or export after deletion.'),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('I understand that linked '
+                        'reconstructions may break'),
+                    value: acknowledgeLinks,
+                    onChanged: (value) =>
+                        redraw(() => acknowledgeLinks = value ?? false),
+                  ),
+                ],
+              ],
+            )),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialog, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: linked > 0 && !acknowledgeLinks ? null :
+                    () => Navigator.pop(dialog, true),
+                child: Text('Permanently delete ${verified.length}'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      setState(() {
+        busy = true;
+        message = 'Deleting only the selected saved files…';
+      });
+      var deleted = 0;
+      var freed = 0;
+      final failures = <String>[];
+      for (final path in verified) {
+        try {
+          final local = File(path);
+          final length = await local.length();
+          await local.delete();
+          deleted++;
+          freed += length;
+        } catch (error) {
+          failures.add('${p.basename(path)}: $error');
+        }
+      }
+      if (mounted) {
+        setState(() {
+          _selectedPaths.removeAll(verified);
+          _selecting = false;
+          message = 'Deleted $deleted of ${verified.length} files '
+              '(${size(freed)}).'
+              '${failures.isEmpty ? "" : " Some deletions failed: ${failures.take(3).join("; ")}"}';
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => message = 'Deletion cancelled: $error');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => busy = false);
+        await refresh();
+      }
+    }
+  }
+
+  void _toggleSelection(String path) {
+    setState(() {
+      if (!_selectedPaths.add(path)) _selectedPaths.remove(path);
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final total = stats.fold<int>(0, (sum, stat) => sum + stat.size);
