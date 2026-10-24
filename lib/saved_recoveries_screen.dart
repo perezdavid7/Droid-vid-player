@@ -12,6 +12,8 @@ import 'raw_video_scan.dart';
 import 'reconstruction_editor.dart';
 
 enum _RecoveryView { all, segments, otherVideos, reports }
+enum _SavedMenuAction { reconstruct, diagnostics, destination, select }
+enum _FileAction { play, verify, inspect, export, readReport, delete }
 
 class SavedRecoveriesScreen extends StatefulWidget {
   const SavedRecoveriesScreen({super.key});
@@ -400,6 +402,139 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     setState(() {
       if (!_selectedPaths.add(path)) _selectedPaths.remove(path);
     });
+  }
+
+
+  void _setView(_RecoveryView next) {
+    setState(() {
+      _view = next;
+      _selectedPaths.clear();
+    });
+  }
+
+  Future<void> _reconstructRecordings() async {
+    final segments = paths.where(isSegment).toList()..sort();
+    final runs = segments.map(segmentRun).toSet().toList()
+      ..sort((a, b) => runTimestamp(b).compareTo(runTimestamp(a)));
+    if (!mounted || runs.isEmpty) return;
+    final chosen = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Choose recovery attempt'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: (runs.length * 70.0).clamp(80.0, 370.0),
+          child: ListView.builder(
+            itemCount: runs.length,
+            itemBuilder: (_, index) {
+              final stem = runs[index];
+              final count = segments.where((x) => segmentRun(x) == stem).length;
+              return ListTile(
+                title: Text('Attempt ${runs.length - index}'),
+                subtitle: Text('${runDate(stem)} · $count segments'),
+                onTap: () => Navigator.pop(ctx, stem),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+        ],
+      ),
+    );
+    if (!mounted || chosen == null) return;
+    await Navigator.push<void>(context, MaterialPageRoute<void>(
+      builder: (_) => ReconstructionEditor(segmentPaths: segments
+          .where((x) => segmentRun(x) == chosen).toList()),
+    ));
+    if (mounted) unawaited(refresh());
+  }
+
+  Future<void> _showDiagnostics() async {
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(ctx).height * 0.72,
+          child: ListView(padding: const EdgeInsets.all(16), children: [
+            Row(children: [
+              const Expanded(child: Text('Recovery diagnostics',
+                  style: TextStyle(fontSize: 19,
+                      fontWeight: FontWeight.bold))),
+              IconButton(
+                tooltip: 'Refresh exit history',
+                icon: const Icon(Icons.refresh),
+                onPressed: () async {
+                  await loadExits();
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  if (mounted) unawaited(_showDiagnostics());
+                },
+              ),
+            ]),
+            if (exitError != null) SelectableText(exitError!),
+            if (lastFatalException != null &&
+                lastFatalException!.isNotEmpty)
+              ExpansionTile(
+                title: const Text('Last fatal exception'),
+                children: [SelectableText(lastFatalException!)],
+              ),
+            if (exits.isEmpty && exitError == null)
+              const Text('No recent Android process exits were returned.'),
+            for (final item in exits)
+              ListTile(
+                title: Text(exitLabel(
+                    (item['reason'] as num?)?.toInt() ?? -1)),
+                subtitle: SelectableText(
+                    '${DateTime.fromMillisecondsSinceEpoch((item['timestamp'] as num?)?.toInt() ?? 0).toLocal()}\n'
+                    '${item['description'] ?? ''}'),
+              ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showDestination() async {
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 24),
+        child: SingleChildScrollView(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('Export destination',
+                style: TextStyle(fontSize: 20,
+                    fontWeight: FontWeight.bold)),
+            RecoveryDestinationPicker(disabled: busy),
+          ],
+        )),
+      )),
+    );
+  }
+
+  void _fileAction(_FileAction action, String path) {
+    if (busy) return;
+    switch (action) {
+      case _FileAction.play:
+        Navigator.of(context).pop(path);
+      case _FileAction.verify:
+        unawaited(verify(path));
+      case _FileAction.inspect:
+        unawaited(inspectBytes(path));
+      case _FileAction.export:
+        unawaited(export(path));
+      case _FileAction.readReport:
+        unawaited(readCheckpoint(path));
+      case _FileAction.delete:
+        unawaited(_deleteFiles([path]));
+    }
   }
 
   @override
