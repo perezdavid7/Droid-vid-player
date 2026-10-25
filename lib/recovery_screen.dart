@@ -17,7 +17,9 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-enum RecoveryMode { quickRepair, deepHighQuality, pastCrash, advancedAnalysis }
+enum RecoveryMode {
+  quickRepair, deepHighQuality, pastCrash, unfinishedMp4, advancedAnalysis
+}
 
 /// Experimental forward-only repair or decode -> re-encode recovery. Never seeks, records
 /// only decoded media streams (not player UI), and never touches the original.
@@ -52,6 +54,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   int _frames = 0;
   int _jumpPercent = 30;
   bool _fullScan = true;
+  bool get _runningFullScan => _mode == RecoveryMode.unfinishedMp4 ||
+      (_mode == RecoveryMode.pastCrash && _fullScan);
   double _fullByteProgress = 0;
   int _fullProbeDone = 0;
   int _fullProbeTotal = 0;
@@ -197,7 +201,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   /// Inspect all source bytes and independently recover candidate sections.
   /// MPEG/TS jobs use exact byte slices; indexed containers use bounded
   /// playback-time windows or a forward-only fallback when no index survives.
-  Future<void> _runFullRecovery() async {
+  Future<void> _runFullRecovery({bool forceMp4Salvage = false}) async {
     final generation = ++_generation;
     setState(() {
       _running = true;
@@ -220,6 +224,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       await _wake(true);
       final scanResult = await FullVideoScan.scan(
         widget.sourcePath,
+        forceMp4Salvage: forceMp4Salvage,
         isCancelled: () => _cancelScan || generation != _generation,
         onByteProgress: (fraction) {
           if (!mounted || generation != _generation) return;
@@ -504,8 +509,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           'Reopen it with the file picker before retrying.');
       return;
     }
-    if (_mode == RecoveryMode.pastCrash && _fullScan) {
-      await _runFullRecovery();
+    if (_runningFullScan) {
+      await _runFullRecovery(
+          forceMp4Salvage: _mode == RecoveryMode.unfinishedMp4);
       return;
     }
     if ((_mode == RecoveryMode.deepHighQuality || _mode == RecoveryMode.pastCrash) && Platform.isAndroid) {
@@ -792,7 +798,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   Future<void> _cancel() async {
     if (!_running || _cancelling) return;
     if (_mode == RecoveryMode.advancedAnalysis ||
-        (_mode == RecoveryMode.pastCrash && _fullScan)) {
+        (_runningFullScan)) {
       setState(() {
         _cancelScan = true;
         _cancelling = true;
@@ -898,6 +904,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                     child: Text('Automatic Scan — all video formats'),
                   ),
                   DropdownMenuItem(
+                    value: RecoveryMode.unfinishedMp4,
+                    child: Text('Unfinished MP4 Salvage — experimental'),
+                  ),
+                  DropdownMenuItem(
                     value: RecoveryMode.advancedAnalysis,
                     child: Text('Advanced Analysis — unknown source'),
                   ),
@@ -917,11 +927,18 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                               'and tests recoverable sections. Some container '
                               'formats require a usable index. Manual MPEG '
                               'byte jump remains available.'
-                            : 'Scans MP4 box markers and potential raw H.264/H.265 '
-                          'headers without loading the full video in memory. '
-                          'Analysis does not reconstruct a missing MP4 index, '
-                          'and detected byte signatures do not guarantee '
-                          'recoverable video.',
+                            : _mode == RecoveryMode.unfinishedMp4
+                                ? 'Experimental recovery for MP4 files with '
+                                  'mdat video data but a missing moov index. '
+                                  'Tests raw MPEG-4 Visual and Annex-B video '
+                                  'samples; it does not reconstruct codec '
+                                  'metadata or recover audio. Original '
+                                  'files remain untouched.'
+                                : 'Scans MP4 box markers and potential raw H.264/H.265 '
+                                  'headers without loading the full video in memory. '
+                                  'Analysis does not reconstruct a missing MP4 index, '
+                                  'and detected byte signatures do not guarantee '
+                                  'recoverable video.',
               ),
               if (_mode == RecoveryMode.pastCrash) ...[
                 const SizedBox(height: 8),
@@ -969,14 +986,14 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 const SizedBox(height: 12),
                 _mode == RecoveryMode.advancedAnalysis
                     ? LinearProgressIndicator(value: _scanProgress)
-                    : _mode == RecoveryMode.pastCrash && _fullScan &&
+                    : _runningFullScan &&
                             _fullByteProgress < 1
                         ? LinearProgressIndicator(value: _fullByteProgress)
                         : const LinearProgressIndicator(),
                 const SizedBox(height: 8),
                 if (_mode == RecoveryMode.advancedAnalysis)
                   Text('Analyzed: ${(_scanProgress * 100).toStringAsFixed(0)}%')
-                else if (_mode == RecoveryMode.pastCrash && _fullScan) ...[
+                else if (_runningFullScan) ...[
                   Text('Source bytes inspected: '
                       '${(_fullByteProgress * 100).toStringAsFixed(0)}% · '
                       'Decoder checks: $_fullProbeDone/$_fullProbeTotal'),
@@ -998,13 +1015,13 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                              'videos may report an incorrect duration.'),
                 ],
               ],
-              if (_mode == RecoveryMode.pastCrash && _fullScan &&
+              if (_runningFullScan &&
                   _fullScannerExplanation != null) ...[
                 const SizedBox(height: 10),
                 Text(_fullScannerExplanation!,
                     style: const TextStyle(fontSize: 12)),
               ],
-              if (_mode == RecoveryMode.pastCrash && _fullScan &&
+              if (_runningFullScan &&
                   _fullRegions.isNotEmpty) ...[
                 const SizedBox(height: 12),
                 Text('Recovery jobs (${_fullRegions.length})',
@@ -1045,8 +1062,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                                 _identification!.hasMdat &&
                                 !_identification!.hasMoov
                                 ? 'MP4 media data found without its movie '
-                                  'index. Neither ordinary repair method '
-                                  'can reliably recreate absent metadata.'
+                                  'index. Ordinary repair cannot reliably '
+                                  'recreate missing metadata. Try the '
+                                  'experimental Unfinished MP4 Salvage mode.'
                                 : _scan!.rawFormat != null
                                     ? 'Potential raw H.264/H.265 headers '
                                       'found; decodability is not yet proven.'
@@ -1083,7 +1101,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                               ? (_fullScan
                                   ? 'Auto Scan 0–100% & Recover Sections'
                                   : 'Manual MPEG Byte Recovery')
-                              : 'Analyze File Structure'),
+                              : _mode == RecoveryMode.unfinishedMp4
+                                  ? 'Salvage Unfinished MP4'
+                                  : 'Analyze File Structure'),
                 ),
               if (_running)
                 OutlinedButton.icon(
@@ -1094,7 +1114,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                           ? 'Cancel analysis' : 'Stop recovery'),
                 ),
               if (_resultPath != null) ...[
-                if (_mode == RecoveryMode.pastCrash && _fullScan)
+                if (_runningFullScan)
                   const Padding(
                     padding: EdgeInsets.symmetric(vertical: 8),
                     child: Text(
