@@ -26,7 +26,8 @@ class UnfinishedMp4Result {
 class _Mp4DataRange {
   final int start;
   final int end;
-  const _Mp4DataRange(this.start, this.end);
+  final bool truncated;
+  const _Mp4DataRange(this.start, this.end, {this.truncated = false});
 }
 
 class _RawMarkers {
@@ -134,7 +135,17 @@ class UnfinishedMp4Scan {
         } else if (bytes == 0) {
           bytes = total - offset;
         }
-        if (bytes < headerLength || bytes > total - offset) break;
+        if (bytes < headerLength) break;
+        if (bytes > total - offset) {
+          // Interrupted MP4 recordings can have a declared mdat size
+          // that extends beyond the bytes actually written to disk.
+          // Scan the surviving payload through EOF, never beyond it.
+          if (kind == 'mdat' && total > offset + headerLength) {
+            data.add(_Mp4DataRange(offset + headerLength, total,
+                truncated: true));
+          }
+          break;
+        }
         if (kind == 'mdat' && bytes > headerLength) {
           data.add(_Mp4DataRange(offset + headerLength,
               offset + bytes));
@@ -306,7 +317,9 @@ class UnfinishedMp4Scan {
     }
 
     return UnfinishedMp4Result(candidates,
-        'Found ${mdats.length} intact mdat box(es) and inspected '
+        'Found ${mdats.length} mdat box(es) '
+        '(${mdats.where((range) => range.truncated).length} truncated at EOF) '
+        'and inspected '
         'all ${windows.length} bounded media-data window(s). '
         'MPEG-4 Visual markers: $totalVol VOL, $totalVop VOP; '
         'Annex-B candidate SPS: H.264=$totalH264, H.265=$totalH265. '
