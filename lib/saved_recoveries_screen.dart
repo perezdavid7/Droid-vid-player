@@ -158,21 +158,93 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     }
   }
 
-  Future<void> readCheckpoint(String path) async {
+  /// Read diagnostics locally; a long FFmpeg log must not freeze the list.
+  Future<void> _showTextReport(String path) async {
+    if (!mounted || busy) return;
     try {
       final file = File(path);
       final length = await file.length();
-      final stream = file.openRead(0, length > 16384 ? 16384 : length);
-      final chunks = await stream.toList();
-      final contents = utf8.decode(chunks.expand((c) => c).toList(),
-          allowMalformed: true);
-      if (mounted) {
-        setState(() => message = 'Saved checkpoint: ${p.basename(path)}\n\n$contents');
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => message = 'Checkpoint read failed: $e');
-      }
+      const maxPreviewBytes = 256 * 1024;
+      final readLength = length > maxPreviewBytes ? maxPreviewBytes : length;
+      final chunks = await file.openRead(0, readLength).toList();
+      final contents = utf8.decode(
+          chunks.expand((part) => part).toList(), allowMalformed: true);
+      final remembered = RegExp(
+        r'Verified configuration remembered: (true|false)',
+      ).firstMatch(contents)?.group(1);
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (sheetContext) => SafeArea(
+          child: SizedBox(
+            height: MediaQuery.sizeOf(sheetContext).height * 0.82,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    path.endsWith('.checkpoint.txt')
+                        ? 'Recovery checkpoint'
+                        : 'Recovery report',
+                    style: Theme.of(sheetContext).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(p.basename(path), maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(sheetContext).textTheme.bodySmall),
+                  if (remembered != null) ...[
+                    const SizedBox(height: 8),
+                    Text(remembered == 'true'
+                        ? 'Verified recovery settings saved: Yes'
+                        : 'Verified recovery settings saved: No',
+                        style: const TextStyle(fontWeight: FontWeight.w600)),
+                  ],
+                  const Divider(),
+                  Expanded(child: SingleChildScrollView(
+                    child: SelectableText(
+                      contents.isEmpty ? '(This report is empty.)' : contents,
+                      style: const TextStyle(
+                          fontFamily: 'monospace', fontSize: 13)),
+                  )),
+                  if (length > readLength)
+                    const Text('Showing the first 256 KB of this report.',
+                        style: TextStyle(fontSize: 12)),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.copy),
+                      label: const Text('Copy shown text'),
+                      onPressed: () async {
+                        await Clipboard.setData(
+                            ClipboardData(text: contents));
+                        if (sheetContext.mounted) {
+                          ScaffoldMessenger.of(sheetContext).showSnackBar(
+                            const SnackBar(
+                                content: Text('Report text copied.')));
+                        }
+                      },
+                    ),
+                    const Spacer(),
+                    FilledButton(
+                      onPressed: () => Navigator.pop(sheetContext),
+                      child: const Text('Close'),
+                    ),
+                  ]),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => message = 'Cannot open report: $error');
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open this report.')),
+      );
     }
   }
 
@@ -720,7 +792,7 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
       case _FileAction.export:
         unawaited(export(path));
       case _FileAction.readReport:
-        unawaited(readCheckpoint(path));
+        unawaited(_showTextReport(path));
       case _FileAction.delete:
         unawaited(_deleteFiles([path]));
     }
@@ -983,9 +1055,15 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                             onChanged: busy ? null :
                                 (_) => _toggleSelection(path),
                           ),
-                        Expanded(child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
+                        Expanded(child: InkWell(
+                          onTap: !video && !_selecting && !busy
+                              ? () => unawaited(_showTextReport(path))
+                              : null,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
                             Text(segment
                                 ? 'Attempt $runNumber · Segment $number'
                                 : name,
@@ -1001,8 +1079,17 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                               Text(name,
                                 maxLines: 1, overflow: TextOverflow.ellipsis,
                                 style: Theme.of(context).textTheme.labelSmall),
-                          ],
+                              ],
+                            ),
+                          ),
                         )),
+                        if (!video && !_selecting)
+                          IconButton(
+                            tooltip: 'View report',
+                            onPressed: busy ? null :
+                                () => unawaited(_showTextReport(path)),
+                            icon: const Icon(Icons.description_outlined),
+                          ),
                         if (video && !_selecting)
                           IconButton(
                             tooltip: 'Play video',
@@ -1030,10 +1117,12 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
                               const PopupMenuItem(
                                 value: _FileAction.export,
                                 child: Text('Export')),
-                            if (fileIsCheckpoint)
-                              const PopupMenuItem(
+                            if (!video)
+                              PopupMenuItem(
                                 value: _FileAction.readReport,
-                                child: Text('View checkpoint')),
+                                child: Text(fileIsCheckpoint
+                                    ? 'View checkpoint'
+                                    : 'View report')),
                             const PopupMenuItem(
                               value: _FileAction.delete,
                               child: Text('Delete…')),
