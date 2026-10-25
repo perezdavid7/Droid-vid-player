@@ -5,6 +5,7 @@ import 'recovery_segments.dart';
 import 'mpeg_recovery_jump.dart';
 import 'mpeg_full_scan.dart';
 import 'full_video_scan.dart';
+import 'unfinished_mp4_scan.dart';
 import 'raw_video_scan.dart';
 import 'file_identification.dart';
 
@@ -415,6 +416,23 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               verified.add(clip.path);
             }
           }
+          var settingsRemembered = false;
+          if (verified.isNotEmpty &&
+              region.guessedWidth != null &&
+              region.guessedHeight != null &&
+              region.guessedTimeBase != null) {
+            try {
+              await UnfinishedMp4Scan.rememberSuccessful(
+                widget.sourcePath,
+                region.guessedWidth!,
+                region.guessedHeight!,
+                region.guessedTimeBase!,
+              );
+              settingsRemembered = true;
+            } catch (_) {
+              // Never discard a recovered clip because preferences failed.
+            }
+          }
           final returnCode = await ended.getReturnCode();
           final logs = await ended.getLogsAsString();
           await logFile.writeAsString(
@@ -423,6 +441,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             'Scanner: ${scanResult.scanner}\n'
             '${region.location}\n'
             'Reconstructed VOL: ${region.reconstruction ?? "none"}\n'
+            'Verified configuration remembered: $settingsRemembered\n'
             'Position: $label\n'
             'Selected stream: ${region.videoStream}\n'
             'Result: ${verified.length} verified / ${clips.length} output clips\n'

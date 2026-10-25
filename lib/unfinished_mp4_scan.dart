@@ -8,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'mpeg_full_scan.dart';
+import 'mp4_vol_profiles.dart';
 
 class Mp4RawRegion {
   final int startByte;
@@ -16,9 +17,13 @@ class Mp4RawRegion {
   final String extension;
   final List<int> prefixBytes;
   final String? reconstruction;
+  final int? guessedWidth;
+  final int? guessedHeight;
+  final int? guessedTimeBase;
   const Mp4RawRegion(this.startByte, this.endByte,
       this.inputFormat, this.extension,
-      {this.prefixBytes = const [], this.reconstruction});
+      {this.prefixBytes = const [], this.reconstruction,
+      this.guessedWidth, this.guessedHeight, this.guessedTimeBase});
 }
 
 class UnfinishedMp4Result {
@@ -88,6 +93,9 @@ class _RawMarkers {
   int? firstVol;
   int? firstVop;
   int? firstIntraVop;
+  int? _previousVop;
+  final List<int> intraVops = [];
+  final List<int> largeGaps = [];
 
   void inspect(List<int> bytes, int position, int absolute) {
     if (bytes[position] != 0 || bytes[position + 1] != 0 ||
@@ -102,9 +110,16 @@ class _RawMarkers {
     if (marker == 0xb6) {
       mpeg4Vop++;
       firstVop ??= absolute;
+      if (_previousVop != null &&
+          absolute - _previousVop! > 3 * 1024 * 1024 &&
+          largeGaps.length < 1000) {
+        largeGaps.add(absolute);
+      }
+      _previousVop = absolute;
       if (position + 4 < bytes.length &&
           (bytes[position + 4] & 0xc0) == 0) {
         firstIntraVop ??= absolute;
+        if (intraVops.length < 20000) intraVops.add(absolute);
       }
     }
     if (marker == 0xb3) mpeg2Sequence++;
@@ -154,7 +169,8 @@ class UnfinishedMp4Scan {
   static const int _mib = 1024 * 1024;
   static const int _maxRangeBytes = 128 * _mib;
   static const int _maxProbes = 128;
-  static const int _maxHeaderTrials = 90;
+  static const int _maxHeaderTrials = 120;
+  static const int _maxSectionBytes = 64 * _mib;
   static const int _headerProbeBytes = 8 * _mib;
   static const List<(int, int)> _sizes = [
     (640, 480), (720, 480), (1280, 720), (1920, 1080),
@@ -200,6 +216,65 @@ class UnfinishedMp4Scan {
     b.put(0, 1); // no scalability.
     return b.finish();
   }
+
+
+  /// Divide long or discontinuous MPEG-4 Visual payloads at actual I-VOP
+  /// positions. Each section is non-overlapping; no duplicate exports.
+  static List<_Mp4DataRange> _sections(
+      _Mp4DataRange range, _RawMarkers markers) {
+    final intra = markers.intraVops;
+    if (markers.mpeg4Vol > 0 || intra.length < 2) return [range];
+    final result = <_Mp4DataRange>[];
+    var start = intra.first;
+    var gapAt = 0;
+    var hasGap = false;
+    for (final nextI in intra.skip(1)) {
+      while (gapAt < markers.largeGaps.length &&
+          markers.largeGaps[gapAt] <= nextI) {
+        if (markers.largeGaps[gapAt] > start) hasGap = true;
+        gapAt++;
+      }
+      final enoughBytes = nextI - start >= 256 * 1024;
+      if (enoughBytes &&
+          (nextI - start >= _maxSectionBytes || hasGap) &&
+          range.end - nextI >= 64 * 1024) {
+        result.add(_Mp4DataRange(start, nextI));
+        start = nextI;
+        hasGap = false;
+      }
+    }
+    if (start < range.end) {
+      result.add(_Mp4DataRange(start, range.end));
+    }
+    return result.isEmpty ? [range] : result;
+  }
+
+  /// Try a few distinct keyframes if one apparent I-VOP cannot be decoded.
+  /// A successful section is still emitted only once.
+  static List<int> _startingFrames(
+      _Mp4DataRange range, _RawMarkers markers) {
+    final possible = markers.intraVops.where((offset) =>
+        offset >= range.start && offset + 64 * 1024 < range.end);
+    final chosen = <int>[];
+    for (final offset in possible) {
+      if (chosen.isEmpty || offset - chosen.last >= 1024 * 1024) {
+        chosen.add(offset);
+        if (chosen.length == 3) break;
+      }
+    }
+    if (chosen.isEmpty && markers.firstVop != null &&
+        markers.firstVop! >= range.start &&
+        markers.firstVop! + 64 * 1024 < range.end) {
+      chosen.add(markers.firstVop!);
+    }
+    return chosen;
+  }
+
+  /// Local verified settings persist across signed updates. A settings write
+  /// happens only after a newly recovered clip passes output verification.
+  static Future<void> rememberSuccessful(
+      String sourcePath, int width, int height, int timeBase) =>
+      Mp4VolProfiles.remember(sourcePath, width, height, timeBase);
 
   static int _be32(List<int> b, int at) =>
       (b[at] << 24) | (b[at + 1] << 16) |
@@ -361,7 +436,9 @@ class UnfinishedMp4Scan {
     }
     onByteProgress?.call(1);
 
-    final proposals = <(int, String, String)>[];
+    // The source has been inspected from 0–100%. Build independent sections
+    // from actual I-VOP markers and large discontinuities, not fixed guesses.
+    final proposals = <(_Mp4DataRange, _RawMarkers, String, String)>[];
     var totalVop = 0, totalVol = 0;
     var totalH264 = 0, totalH265 = 0;
     for (var i = 0; i < windows.length; i++) {
@@ -371,69 +448,134 @@ class UnfinishedMp4Scan {
       totalH264 += markers.h264Sps;
       totalH265 += markers.h265Sps;
       for (final (format, extension) in markers.probeFormats) {
-        proposals.add((i, format, extension));
+        final ranges = format == 'm4v'
+            ? _sections(windows[i], markers)
+            : [windows[i]];
+        for (final section in ranges) {
+          if (section.end - section.start >= 64 * 1024) {
+            proposals.add((section, markers, format, extension));
+          }
+        }
       }
     }
+    final discovered = proposals.length;
+    // Spread bounded probes across the complete file, including its end.
     if (proposals.length > _maxProbes) {
-      proposals.removeRange(_maxProbes, proposals.length);
+      final all = List.of(proposals);
+      proposals.clear();
+      for (var i = 0; i < _maxProbes; i++) {
+        final at = i * (all.length - 1) ~/ (_maxProbes - 1);
+        proposals.add(all[at]);
+      }
     }
-    final missingVolWindows = proposals.where((item) =>
-        item.$2 == 'm4v' && counts[item.$1].mpeg4Vol == 0).length;
-    final perWindowBudget = math.min(
-        _sizes.length * _timeBases.length,
-        math.max(6, _maxHeaderTrials ~/ math.max(1, missingVolWindows))).toInt();
-    final totalTests = (proposals.length +
-        math.min(_maxHeaderTrials, missingVolWindows * perWindowBudget)).toInt();
+
+    List<Mp4VolProfile> remembered;
+    try {
+      remembered = await Mp4VolProfiles.candidatesFor(path);
+    } catch (_) {
+      remembered = [];
+    }
+    final runtimeWinningSettings = <(int, int, int)>[];
+    final missingVolSections = proposals.where((item) =>
+        item.$3 == 'm4v' && item.$2.mpeg4Vol == 0).length;
+    final perSectionBudget = math.min(
+        96, math.max(12,
+            120 ~/ math.max(1, missingVolSections))).toInt();
+    final plannedTests = (proposals.length + _maxHeaderTrials +
+        math.min(24, remembered.length) * missingVolSections).toInt();
     var testsDone = 0;
     var syntheticTrials = 0;
-    var syntheticRecovered = 0;
+    var cachedSelections = 0;
+    var alternateStarts = 0;
     final winningGuesses = <String>[];
-    onProbeProgress?.call(0, totalTests);
+    onProbeProgress?.call(0, plannedTests);
 
     final tempFolder = await getTemporaryDirectory();
     final candidates = <Mp4RawRegion>[];
     for (var indexInList = 0;
         indexInList < proposals.length; indexInList++) {
       if (isCancelled()) throw const MpegScanCancelled();
-      final (index, format, extension) = proposals[indexInList];
-      final region = windows[index];
-      final markers = counts[index];
+      final (region, markers, format, extension) = proposals[indexInList];
       final needsVol = format == 'm4v' && markers.mpeg4Vol == 0;
-      final start = needsVol
-          ? (markers.firstIntraVop ?? markers.firstVop ?? region.start)
-          : format == 'm4v'
-              ? (markers.firstVol ??
-                  math.max(region.start,
-                      (markers.firstVop ?? region.start) - 64 * 1024))
-              : region.start;
-      if (region.end - start < 64 * 1024) {
+      final starts = needsVol
+          ? _startingFrames(region, markers)
+          : <int>[
+              format == 'm4v'
+                  ? (markers.firstVol ??
+                      math.max(region.start,
+                          (markers.firstVop ?? region.start) - 64 * 1024))
+                  : region.start,
+            ];
+      if (starts.isEmpty) {
         testsDone++;
-        onProbeProgress?.call(testsDone, totalTests);
+        onProbeProgress?.call(testsDone, plannedTests);
         continue;
       }
+
       final temp = File(p.join(tempFolder.path,
           'droid_raw_mp4_${DateTime.now().microsecondsSinceEpoch}'
           '_$indexInList$extension'));
       try {
-        final probeSize = needsVol ? _headerProbeBytes : 24 * _mib;
-        final end = math.min(region.end, start + probeSize);
-        await MpegFullScan.copyByteRange(file, temp, start, end,
-            isCancelled: isCancelled);
         if (needsVol) {
-          final rawFrames = await temp.readAsBytes();
           _DecodeProbe? best;
           List<int>? bestHeader;
+          (int, int, int)? bestSettings;
           String? bestDescription;
+          var bestStart = starts.first;
+          var bestFromCache = false;
           var localTrials = 0;
-          trialLoop:
-          for (final timeBase in _timeBases) {
-            for (final (width, height) in _sizes) {
-              if (localTrials >= perWindowBudget ||
-                  syntheticTrials >= _maxHeaderTrials) {
-                break trialLoop;
+          // Guarantee the original 72-setting pass for one continuous
+          // section; reserve a few probes for alternate I-VOP starts.
+          final firstStartBudget = starts.length == 1
+              ? perSectionBudget
+              : math.min(72, math.max(6, perSectionBudget - 16)).toInt();
+          startLoop:
+          for (var startIndex = 0;
+              startIndex < starts.length; startIndex++) {
+            final startByte = starts[startIndex];
+            if (region.end - startByte < 64 * 1024) continue;
+            if (localTrials >= perSectionBudget) break;
+            if (startIndex > 0) alternateStarts++;
+            final end = math.min(region.end,
+                startByte + _headerProbeBytes);
+            await MpegFullScan.copyByteRange(file, temp, startByte, end,
+                isCancelled: isCancelled);
+            final rawFrames = await temp.readAsBytes();
+
+            final choices = <(int, int, int, bool)>[];
+            final visited = <String>{};
+            void offer(int width, int height, int time, bool reused) {
+              final key = '$width/$height/$time';
+              if (visited.add(key)) choices.add((width, height, time, reused));
+            }
+            for (final (width, height, time) in runtimeWinningSettings) {
+              offer(width, height, time, true);
+            }
+            for (final profile in remembered.take(12)) {
+              offer(profile.width, profile.height, profile.timeBase, true);
+            }
+            for (final time in _timeBases) {
+              for (final (width, height) in _sizes) {
+                offer(width, height, time, false);
               }
+            }
+
+            var testedThisStart = 0;
+            final startBudget = startIndex == 0
+                ? firstStartBudget
+                : math.max(4,
+                    (perSectionBudget - firstStartBudget) ~/
+                    math.max(1, starts.length - 1)).toInt();
+            for (final (width, height, time, reused) in choices) {
               if (isCancelled()) throw const MpegScanCancelled();
-              final header = _syntheticVol(width, height, timeBase);
+              if (localTrials >= perSectionBudget ||
+                  testedThisStart >= startBudget) {
+                break;
+              }
+              if (!reused && syntheticTrials >= _maxHeaderTrials) {
+                continue;
+              }
+              final header = _syntheticVol(width, height, time);
               final probeBytes = Uint8List(header.length + rawFrames.length);
               probeBytes.setRange(0, header.length, header);
               probeBytes.setRange(
@@ -442,33 +584,48 @@ class UnfinishedMp4Scan {
               final result =
                   await _decodedFrames(temp.path, format, isCancelled);
               localTrials++;
-              syntheticTrials++;
+              testedThisStart++;
               testsDone++;
-              onProbeProgress?.call(testsDone, totalTests);
+              if (!reused) syntheticTrials++;
+              onProbeProgress?.call(testsDone, plannedTests);
               if (result.usable &&
                   (best == null || result.errors < best.errors)) {
                 best = result;
                 bestHeader = header;
-                bestDescription = '${width}x$height '
-                    'time-base $timeBase '
-                    '(${result.errors} decoder error indicators)';
-                if (result.errors == 0) break trialLoop;
+                bestStart = startByte;
+                bestSettings = (width, height, time);
+                bestFromCache = reused;
+                bestDescription = '${width}x$height time-base $time '
+                    '(${result.errors} decoder error indicators)'
+                    '${reused ? ', reused candidate setting' : ''}';
+                if (result.errors == 0) break startLoop;
               }
             }
+            if (best != null && best.errors <= 2) break;
           }
-          if (bestHeader != null) {
-            syntheticRecovered++;
+          if (bestHeader != null && bestSettings != null) {
+            if (bestFromCache) cachedSelections++;
+            runtimeWinningSettings.remove(bestSettings);
+            runtimeWinningSettings.insert(0, bestSettings);
             winningGuesses.add(bestDescription!);
             candidates.add(Mp4RawRegion(
-                start, region.end, format, extension,
+                bestStart, region.end, format, extension,
                 prefixBytes: bestHeader,
-                reconstruction: bestDescription));
+                reconstruction: bestDescription,
+                guessedWidth: bestSettings.$1,
+                guessedHeight: bestSettings.$2,
+                guessedTimeBase: bestSettings.$3));
           }
         } else {
+          final start = starts.first;
+          if (region.end - start < 64 * 1024) continue;
+          final end = math.min(region.end, start + 24 * _mib);
+          await MpegFullScan.copyByteRange(file, temp, start, end,
+              isCancelled: isCancelled);
           final result =
               await _decodedFrames(temp.path, format, isCancelled);
           testsDone++;
-          onProbeProgress?.call(testsDone, totalTests);
+          onProbeProgress?.call(testsDone, plannedTests);
           if (result.usable) {
             candidates.add(
                 Mp4RawRegion(start, region.end, format, extension));
@@ -480,23 +637,43 @@ class UnfinishedMp4Scan {
         } catch (_) {}
       }
     }
-    onProbeProgress?.call(totalTests, totalTests);
+    onProbeProgress?.call(plannedTests, plannedTests);
+
+    candidates.sort((a, b) {
+      final at = a.startByte.compareTo(b.startByte);
+      if (at != 0) return at;
+      if (a.inputFormat == 'm4v' && b.inputFormat != 'm4v') return -1;
+      if (b.inputFormat == 'm4v' && a.inputFormat != 'm4v') return 1;
+      return a.endByte.compareTo(b.endByte);
+    });
+    final nonOverlapping = <Mp4RawRegion>[];
+    for (final candidate in candidates) {
+      if (nonOverlapping.isNotEmpty &&
+          candidate.startByte < nonOverlapping.last.endByte) {
+        continue; // Another decoder already verified this byte range.
+      }
+      nonOverlapping.add(candidate);
+    }
 
     final guessSummary = winningGuesses.isEmpty
         ? ''
         : 'Winning guesses: ${winningGuesses.take(4).join('; ')}. ';
-    return UnfinishedMp4Result(candidates,
+    return UnfinishedMp4Result(nonOverlapping,
         'Found ${mdats.length} mdat box(es) '
         '(${mdats.where((range) => range.truncated).length} truncated at EOF) '
         'and inspected '
         'all ${windows.length} bounded media-data window(s). '
         'MPEG-4 Visual markers: $totalVol VOL, $totalVop VOP; '
         'Annex-B candidate SPS: H.264=$totalH264, H.265=$totalH265. '
-        '$syntheticTrials locally generated MPEG-4 VOL header trials; '
-        '$syntheticRecovered window(s) decoded with candidate headers. '
+        'Identified $discovered potential bounded sections; tested '
+        '${proposals.length} of them across the full file and found '
+        '${nonOverlapping.length} decoder-verified, non-overlapping jobs. '
+        '$syntheticTrials new header configurations tested, '
+        '$cachedSelections prior or session-success settings reused, '
+        '$alternateStarts alternate keyframe starts tried. '
         '$guessSummary'
-        '${candidates.length} raw video window(s) decoded enough '
-        'frames to attempt extraction. This experimental scanner '
+        'These candidates decoded enough frames to attempt extraction. '
+        'This experimental scanner '
         'recovers video only, with approximate timing and no audio. '
         'Guessed headers are not original metadata: preview reconstructed '
         'results for correct image dimensions and quality. '
