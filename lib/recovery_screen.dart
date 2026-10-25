@@ -194,8 +194,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
 
   DateTime _lastRecoveryPaint = DateTime.fromMillisecondsSinceEpoch(0);
 
-  /// Analyze all source bytes and recover every independently verified region.
-  /// Jobs are isolated by a temporary BYTE slice, rather than corrupt PTS.
+  /// Inspect all source bytes and independently recover candidate sections.
+  /// MPEG/TS jobs use exact byte slices; indexed containers use bounded
+  /// playback-time windows or a forward-only fallback when no index survives.
   Future<void> _runFullRecovery() async {
     final generation = ++_generation;
     setState(() {
