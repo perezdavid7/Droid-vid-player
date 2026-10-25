@@ -99,10 +99,12 @@ class FullVideoScan {
     }
 
     final extension = p.extension(path).toLowerCase();
-    final isPs = _ps.contains(extension) ||
-        identification.format == 'MPEG program stream';
-    final isTs = _ts.contains(extension) ||
-        identification.format == 'MPEG transport stream';
+    // Trust a recognized container signature ahead of a misleading file
+    // extension, but fall back to the extension when headers are damaged.
+    final isPs = identification.format == 'MPEG program stream' ||
+        (_ps.contains(extension) && identification.category == 'unknown');
+    final isTs = identification.format == 'MPEG transport stream' ||
+        (_ts.contains(extension) && identification.category == 'unknown');
     if (isPs) {
       final found = await MpegFullScan.scan(path,
         isCancelled: isCancelled,
@@ -286,7 +288,7 @@ class FullVideoScan {
     try {
       final session = await FFprobeKit.getMediaInformation(path)
           .timeout(const Duration(seconds: 35));
-      final info = await session.getMediaInformation();
+      final info = session.getMediaInformation();
       if (info != null) {
         duration = double.tryParse(info.getDuration() ?? '');
         hasVideo = info.getStreams().any((stream) =>
@@ -417,10 +419,11 @@ class FullVideoScan {
         if (!done.isCompleted) done.complete();
       });
       sessionId = session.getSessionId();
+      final activeSessionId = sessionId;
       cancellationTimer = Timer.periodic(const Duration(milliseconds: 400),
           (_) {
-        if (isCancelled() && sessionId != null) {
-          unawaited(FFmpegKit.cancel(sessionId));
+        if (isCancelled() && activeSessionId != null) {
+          unawaited(FFmpegKit.cancel(activeSessionId));
         }
       });
       await done.future.timeout(const Duration(seconds: 20));
