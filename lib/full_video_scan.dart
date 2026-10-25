@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'file_identification.dart';
 import 'mpeg_full_scan.dart';
 import 'raw_video_scan.dart';
+import 'unfinished_mp4_scan.dart';
 
 /// A bounded recovery job. Byte ranges are exact; time ranges use the media
 /// index and MUST NOT be misrepresented as complete byte-range decoding.
@@ -82,6 +83,7 @@ class FullVideoScan {
     required bool Function() isCancelled,
     void Function(double)? onByteProgress,
     void Function(int completed, int total)? onProbeProgress,
+    bool forceMp4Salvage = false,
   }) async {
     final file = File(path);
     if (!await file.exists()) {
@@ -99,6 +101,36 @@ class FullVideoScan {
     }
 
     final extension = p.extension(path).toLowerCase();
+    if (forceMp4Salvage && !identification.isMp4Family) {
+      throw StateError('Experimental unfinished-MP4 salvage requires '
+          'a recognized MP4/ISO media container.');
+    }
+    if (forceMp4Salvage ||
+        (identification.isMp4Family && identification.hasMdat &&
+         !identification.hasMoov)) {
+      final attempt = await UnfinishedMp4Scan.scan(path,
+        isCancelled: isCancelled,
+        onByteProgress: onByteProgress,
+        onProbeProgress: onProbeProgress,
+      );
+      return FullScanResult(
+        scanner: 'Unfinished MP4 (experimental raw-video salvage)',
+        explanation: attempt.explanation,
+        exactByteRanges: true,
+        jobs: [
+          for (final region in attempt.regions)
+            FullRecoveryJob(
+              startByte: region.startByte,
+              endByte: region.endByte,
+              sourceBytes: sourceBytes,
+              videoStream: '0:v:0',
+              inputFormat: region.inputFormat,
+              inputExtension: region.extension,
+              legacyMpeg: false,
+            ),
+        ],
+      );
+    }
     // Trust a recognized container signature ahead of a misleading file
     // extension, but fall back to the extension when headers are damaged.
     final isPs = identification.format == 'MPEG program stream' ||
