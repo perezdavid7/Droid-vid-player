@@ -381,9 +381,9 @@ class UnfinishedMp4Scan {
         item.$2 == 'm4v' && counts[item.$1].mpeg4Vol == 0).length;
     final perWindowBudget = math.min(
         _sizes.length * _timeBases.length,
-        math.max(6, _maxHeaderTrials ~/ math.max(1, missingVolWindows)));
-    final totalTests = proposals.length +
-        math.min(_maxHeaderTrials, missingVolWindows * perWindowBudget);
+        math.max(6, _maxHeaderTrials ~/ math.max(1, missingVolWindows))).toInt();
+    final totalTests = (proposals.length +
+        math.min(_maxHeaderTrials, missingVolWindows * perWindowBudget)).toInt();
     var testsDone = 0;
     var syntheticTrials = 0;
     var syntheticRecovered = 0;
