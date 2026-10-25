@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'recovery_segments.dart';
 import 'mpeg_recovery_jump.dart';
 import 'mpeg_full_scan.dart';
+import 'full_video_scan.dart';
 import 'raw_video_scan.dart';
 import 'file_identification.dart';
 
@@ -31,7 +32,7 @@ class RecoveryScreen extends StatefulWidget {
 }
 
 class _RecoveryScreenState extends State<RecoveryScreen> {
-  RecoveryMode _mode = RecoveryMode.deepHighQuality;
+  RecoveryMode _mode = RecoveryMode.pastCrash;
   RawVideoScan? _scan;
   FileIdentification? _identification;
   double _scanProgress = 0;
@@ -54,7 +55,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
   double _fullByteProgress = 0;
   int _fullProbeDone = 0;
   int _fullProbeTotal = 0;
-  List<MpegRecoveryRegion> _fullRegions = [];
+  List<FullRecoveryJob> _fullRegions = [];
+  String? _fullScannerExplanation;
   List<String> _fullJobStatus = [];
   int _fullVerifiedSegments = 0;
   MpegJumpResult? _lastJump;
@@ -192,18 +194,10 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
 
   DateTime _lastRecoveryPaint = DateTime.fromMillisecondsSinceEpoch(0);
 
-  /// Analyze all source bytes and recover every independently verified region.
-  /// Jobs are isolated by a temporary BYTE slice, rather than corrupt PTS.
+  /// Inspect all source bytes and independently recover candidate sections.
+  /// MPEG/TS jobs use exact byte slices; indexed containers use bounded
+  /// playback-time windows or a forward-only fallback when no index survives.
   Future<void> _runFullRecovery() async {
-    if (!{'.mpg', '.mpeg', '.vob'}.contains(
-        p.extension(widget.sourcePath).toLowerCase())) {
-      if (mounted) {
-        setState(() => _error =
-            'Full-file byte recovery currently supports MPEG program streams '
-            '(.mpg, .mpeg, .vob). Other formats need their own scanners.');
-      }
-      return;
-    }
     final generation = ++_generation;
     setState(() {
       _running = true;
@@ -217,13 +211,14 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       _fullProbeDone = 0;
       _fullProbeTotal = 0;
       _fullRegions = [];
+      _fullScannerExplanation = null;
       _fullJobStatus = [];
       _fullVerifiedSegments = 0;
       _status = 'Scanning all source bytes from 0% to 100%…';
     });
     try {
       await _wake(true);
-      final regions = await MpegFullScan.scan(
+      final scanResult = await FullVideoScan.scan(
         widget.sourcePath,
         isCancelled: () => _cancelScan || generation != _generation,
         onByteProgress: (fraction) {
@@ -231,9 +226,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           if (fraction - _fullByteProgress >= 0.01 || fraction >= 1) {
             setState(() {
               _fullByteProgress = fraction;
-              _status = 'Scanning every source byte: '
+              _status = 'Scanning source bytes: '
                   '${(fraction * 100).toStringAsFixed(0)}%. '
-                  'Next: independently test video in candidate sections.';
+                  'Next: test recoverability using the detected format.';
             });
           }
         },
@@ -242,8 +237,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           setState(() {
             _fullProbeDone = done;
             _fullProbeTotal = total;
-            _status = 'Entire source scanned (100%). '
-                'Testing local video in candidate sections: $done / $total. '
+            _status = 'Entire source inspected (100%). '
+                'Testing candidate video sections: $done / $total. '
                 'A failed section does not stop the scan.';
           });
         },
@@ -252,15 +247,20 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         throw const MpegScanCancelled();
       }
       if (!mounted) return;
+      final regions = scanResult.jobs;
       setState(() {
+        _fullScannerExplanation = '${scanResult.scanner}: '
+            '${scanResult.explanation}';
         _fullRegions = regions;
         _fullJobStatus = List<String>.filled(
             regions.length, 'Waiting to recover');
         _status = regions.isEmpty
-            ? 'Inspected 100% of source bytes; no locally decodable '
-              'MPEG video sections were found.'
-            : 'Full 0–100% scan complete. Found ${regions.length} '
-              'separate recovery jobs; processing them one at a time.';
+            ? 'Inspected 100% of source bytes. '
+              'No independently verified recovery sections were found; '
+              'see the scanner explanation below.'
+            : 'Full scan complete using ${scanResult.scanner}. '
+              'Found ${regions.length} recovery jobs; '
+              'processing them independently.';
       });
       if (regions.isEmpty) return;
 
@@ -279,20 +279,26 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
       for (var i = 0; i < regions.length; i++) {
         if (_cancelScan) throw const MpegScanCancelled();
         final region = regions[i];
-        final label = '${region.startPercent.toStringAsFixed(1)}–'
+        final label = '${region.isByteRange ? "" : "~"}'
+            '${region.startPercent.toStringAsFixed(1)}–'
             '${region.endPercent.toStringAsFixed(1)}%';
         final stem = '${baseName}_fullscan_job'
             '${(i + 1).toString().padLeft(3, "0")}'
             '_${DateTime.now().millisecondsSinceEpoch}';
-        final temporary = File(p.join(tempDirectory.path, '$stem.input.mpg'));
+        final File? temporary = region.isByteRange
+            ? File(p.join(tempDirectory.path,
+                '$stem.input${region.inputExtension}'))
+            : null;
         final pattern = p.join(directory.path, '$stem.segment_%05d.mkv');
         final logFile = File(p.join(directory.path, '$stem.log.txt'));
         try {
           if (Platform.isAndroid) {
             const channel = MethodChannel('droid_vid_player/storage');
             final available = await channel.invokeMethod<int>('availableBytes');
-            // Temporary source slice + output growth + working headroom.
-            final reserve = region.length * 2 + 512 * 1024 * 1024;
+            // Byte ranges require a source copy; indexed jobs read in place.
+            final reserve = region.isByteRange
+                ? region.length * 2 + 512 * 1024 * 1024
+                : 1024 * 1024 * 1024;
             if (available == null || available < reserve) {
               _fullJobStatus[i] = 'Paused — insufficient free space';
               throw StateError('Not enough free space for job ${i + 1}. '
@@ -303,15 +309,19 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
 
           if (mounted) {
             setState(() {
-            _fullJobStatus[i] = 'Copying isolated source bytes';
-            _status = 'Job ${i + 1}/${regions.length} ($label): '
-                'preparing an isolated input. Original is untouched.';
+              _fullJobStatus[i] = region.isByteRange
+                  ? 'Copying isolated source bytes'
+                  : 'Preparing indexed video interval';
+              _status = 'Job ${i + 1}/${regions.length} ($label): '
+                  'preparing recovery. Original is untouched.';
             });
           }
-          await MpegFullScan.copyByteRange(
-            source, temporary, region.startByte, region.endByte,
-            isCancelled: () => _cancelScan,
-          );
+          if (temporary != null) {
+            await MpegFullScan.copyByteRange(
+              source, temporary, region.startByte, region.endByte,
+              isCancelled: () => _cancelScan,
+            );
+          }
           if (_cancelScan) throw const MpegScanCancelled();
 
           _stopSegmentTimer();
@@ -338,10 +348,21 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               '-fflags', '+genpts+discardcorrupt',
               '-err_detect', 'ignore_err',
               '-threads', '2',
-              '-f', 'mpeg', '-i', temporary.path,
-              '-map', region.videoStream, '-sn', '-dn',
+              if (temporary != null) ...[
+                '-f', region.inputFormat, '-i', temporary.path,
+              ] else ...[
+                if (region.startSeconds! > 0)
+                  ...['-ss', region.startSeconds!.toStringAsFixed(3)],
+                '-i', widget.sourcePath,
+                if (region.endSeconds! > region.startSeconds!)
+                  ...['-t', (region.endSeconds! - region.startSeconds!)
+                      .toStringAsFixed(3)],
+              ],
+              '-map', region.videoStream,
+              if (temporary == null) ...['-map', '0:a:0?'],
+              '-sn', '-dn',
             ],
-            pattern: pattern, legacyMpeg: true,
+            pattern: pattern, legacyMpeg: region.legacyMpeg,
           );
           final session = await FFmpegKit.executeWithArgumentsAsync(
             args,
@@ -367,7 +388,15 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           if (_cancelScan && _sessionId != null) {
             await FFmpegKit.cancel(_sessionId);
           }
-          final ended = await finished.future;
+          FFmpegSession ended;
+          try {
+            ended = await finished.future.timeout(
+                const Duration(minutes: 20));
+          } on TimeoutException {
+            if (_sessionId != null) await FFmpegKit.cancel(_sessionId);
+            throw StateError('This recovery job stopped responding '
+                'after 20 minutes. Moving to the next section.');
+          }
           _sessionId = null;
           _stopSegmentTimer();
           await _checkSegments();
@@ -385,8 +414,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           await logFile.writeAsString(
             'Full-file recovery job ${i + 1}/${regions.length}\n'
             'Source: ${widget.sourcePath}\n'
-            'Byte range: ${region.startByte}–${region.endByte}\n'
-            'Source fraction: $label\n'
+            'Scanner: ${scanResult.scanner}\n'
+            '${region.location}\n'
+            'Position: $label\n'
             'Selected stream: ${region.videoStream}\n'
             'Result: ${verified.length} verified / ${clips.length} output clips\n'
             'FFmpeg exit: $returnCode\n\n$logs',
@@ -422,13 +452,15 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           _stopSegmentTimer();
           _sessionId = null;
           try {
-            if (await temporary.exists()) await temporary.delete();
+            if (temporary != null && await temporary.exists()) {
+              await temporary.delete();
+            }
           } catch (_) {}
         }
       }
       if (mounted) {
         setState(() {
-        _status = 'Full 0–100% scan and queue finished: '
+        _status = 'Automatic scan and recovery queue finished: '
             '$completed / ${regions.length} jobs processed, '
             '$_fullVerifiedSegments locally verified video clips. '
             'Find every saved clip under Saved Recoveries → Segments.';
@@ -863,7 +895,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                   ),
                   DropdownMenuItem(
                     value: RecoveryMode.pastCrash,
-                    child: Text('Recover Past Crash — MPEG byte jump'),
+                    child: Text('Automatic Scan — all video formats'),
                   ),
                   DropdownMenuItem(
                     value: RecoveryMode.advancedAnalysis,
@@ -880,10 +912,11 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                         ? 'Decodes frames and audio into 90-second MKV segments. Requires '
                           'FFmpeg to recognize the input container.'
                         : _mode == RecoveryMode.pastCrash
-                            ? 'Full-file MPEG mode scans all source bytes '
-                              '(0–100%), verifies local decoded video, '
-                              'and recovers sections as separate bounded jobs. '
-                              'Manual byte jump remains available.'
+                            ? 'Detects MPEG/VOB, MTS/M2TS/TS, MP4/MOV, MKV, AVI, WMV '
+                              'and other recognized videos. Scans all bytes '
+                              'and tests recoverable sections. Some container '
+                              'formats require a usable index. Manual MPEG '
+                              'byte jump remains available.'
                             : 'Scans MP4 box markers and potential raw H.264/H.265 '
                           'headers without loading the full video in memory. '
                           'Analysis does not reconstruct a missing MP4 index, '
@@ -894,10 +927,11 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                 const SizedBox(height: 8),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('Full-file scan: 0–100%'),
+                  title: const Text('Automatic full-file scan: 0–100%'),
                   subtitle: const Text(
-                    'Examine the entire MPEG-PS file, test local frames, '
-                    'and recover separate queued sections. Large files '
+                    'Detect the video format, inspect all bytes, verify '
+                    'playable sections and recover separate jobs. Indexed '
+                    'formats may require readable metadata. Large files '
                     'can take a long time.'),
                   value: _fullScan,
                   onChanged: locked ? null :
@@ -912,9 +946,9 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                   onChanged: locked ? null :
                       (value) => setState(() => _jumpPercent = value.round()),
                 ),
-                const Text('Try 30% first. If that crashes, try 50% or 70%. '
-                    'This is a byte position, not an exact timestamp. '
-                    'Earlier recovery clips will not be overwritten.',
+                const Text('Manual byte jump is available only for MPEG program '
+                    'streams (MPG/MPEG/VOB). This is a byte position, '
+                    'not a timestamp. Earlier clips are preserved.',
                     style: TextStyle(fontSize: 12)),
                 if (_lastJump != null)
                   Text('Byte start: ${_lastJump!.alignedByte} / '
@@ -963,6 +997,12 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                   const Text('Progress is not a percentage because damaged '
                              'videos may report an incorrect duration.'),
                 ],
+              ],
+              if (_mode == RecoveryMode.pastCrash && _fullScan &&
+                  _fullScannerExplanation != null) ...[
+                const SizedBox(height: 10),
+                Text(_fullScannerExplanation!,
+                    style: const TextStyle(fontSize: 12)),
               ],
               if (_mode == RecoveryMode.pastCrash && _fullScan &&
                   _fullRegions.isNotEmpty) ...[
@@ -1041,8 +1081,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                           ? 'Start High-Quality Deep Recovery'
                           : _mode == RecoveryMode.pastCrash
                               ? (_fullScan
-                                  ? 'Scan 0–100% & Recover Sections'
-                                  : 'Recover Past Crash (Manual)')
+                                  ? 'Auto Scan 0–100% & Recover Sections'
+                                  : 'Manual MPEG Byte Recovery')
                               : 'Analyze File Structure'),
                 ),
               if (_running)
