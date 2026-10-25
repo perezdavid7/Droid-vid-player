@@ -24,6 +24,8 @@ class RawVideoScan {
   final int psAudioPackets;
   final int mpegSequenceHeaders;
   final int mpegPictureHeaders;
+  final int mpeg4VisualVol;
+  final int mpeg4VisualVop;
   final int? mpegSequenceOffset;
   final int validatedMpegSequenceHeaders;
   final String firstBytesHex;
@@ -47,6 +49,8 @@ class RawVideoScan {
     required this.psAudioPackets,
     required this.mpegSequenceHeaders,
     required this.mpegPictureHeaders,
+    required this.mpeg4VisualVol,
+    required this.mpeg4VisualVop,
     required this.mpegSequenceOffset,
     required this.validatedMpegSequenceHeaders,
     required this.firstBytesHex,
@@ -76,6 +80,8 @@ class RawVideoScan {
           'video PES=$psVideoPackets, audio PES=$psAudioPackets',
       'MPEG-1/2 video start codes: sequence=$mpegSequenceHeaders, '
           'picture=$mpegPictureHeaders',
+      'Raw MPEG-4 Visual start codes: VOL=$mpeg4VisualVol, '
+          'VOP=$mpeg4VisualVop (signatures do not establish decodability)',
       'Plausible MPEG-2 sequence headers: $validatedMpegSequenceHeaders'
           '${mpegSequenceOffset == null ? '' : ', first at byte $mpegSequenceOffset'}'
           ' (not yet decoded)',
@@ -136,6 +142,7 @@ Future<RawVideoScan> scanRawVideo(
   var vps265 = 0, sps265 = 0, pps265 = 0, irap265 = 0;
   var psPackHeaders = 0, psVideoPackets = 0, psAudioPackets = 0;
   var mpegSequenceHeaders = 0, mpegPictureHeaders = 0;
+  var mpeg4VisualVol = 0, mpeg4VisualVop = 0;
   int? start264, start265, startMpegSequence;
   var plausibleMpegSequences = 0;
   var consumed = 0;
@@ -186,6 +193,8 @@ Future<RawVideoScan> scanRawVideo(
         }
       }
       if (header == 0x00) mpegPictureHeaders++;
+      if (header >= 0x20 && header <= 0x2f) mpeg4VisualVol++;
+      if (header == 0xb6) mpeg4VisualVop++;
       if ((header & 0x80) == 0) {
         switch (header & 0x1f) {
           case 7:
@@ -255,6 +264,7 @@ Future<RawVideoScan> scanRawVideo(
     psPackHeaders: psPackHeaders, psVideoPackets: psVideoPackets,
     psAudioPackets: psAudioPackets, mpegSequenceHeaders: mpegSequenceHeaders,
     mpegPictureHeaders: mpegPictureHeaders,
+    mpeg4VisualVol: mpeg4VisualVol, mpeg4VisualVop: mpeg4VisualVop,
     mpegSequenceOffset: startMpegSequence,
     validatedMpegSequenceHeaders: plausibleMpegSequences,
     firstBytesHex: firstBytes.map(
