@@ -42,16 +42,22 @@ class _RawMarkers {
   int h265Pps = 0;
   int h265Irap = 0;
   int? firstVol;
+  int? firstVop;
 
   void inspect(List<int> bytes, int position, int absolute) {
     if (bytes[position] != 0 || bytes[position + 1] != 0 ||
-        bytes[position + 2] != 1) return;
+        bytes[position + 2] != 1) {
+      return;
+    }
     final marker = bytes[position + 3];
     if (marker >= 0x20 && marker <= 0x2f) {
       mpeg4Vol++;
       firstVol ??= absolute;
     }
-    if (marker == 0xb6) mpeg4Vop++;
+    if (marker == 0xb6) {
+      mpeg4Vop++;
+      firstVop ??= absolute;
+    }
     if (marker == 0xb3) mpeg2Sequence++;
     if (marker == 0x00) mpeg2Picture++;
 
@@ -271,7 +277,9 @@ class UnfinishedMp4Scan {
       // A VOL header is preferable for MPEG-4 Visual, if present in
       // this bounded window. Without codec headers the decoder may fail.
       final start = format == 'm4v'
-          ? (counts[index].firstVol ?? region.start)
+          ? (counts[index].firstVol ??
+              math.max(region.start,
+                  (counts[index].firstVop ?? region.start) - 64 * 1024))
           : region.start;
       if (region.end - start < 64 * 1024) {
         completed++;
