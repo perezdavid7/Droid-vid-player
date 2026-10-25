@@ -560,36 +560,82 @@ class _SavedRecoveriesScreenState extends State<SavedRecoveriesScreen> {
     final runs = segments.map(segmentRun).toSet().toList()
       ..sort((a, b) => runTimestamp(b).compareTo(runTimestamp(a)));
     if (!mounted || runs.isEmpty) return;
-    final chosen = await showDialog<String>(
+    // Start with the newest attempt selected, preserving the familiar
+    // single-attempt workflow. Additional attempts can be checked together.
+    final selectedRuns = <String>{runs.first};
+    final chosen = await showDialog<Set<String>>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Choose recovery attempt'),
-        content: SizedBox(
-          width: double.maxFinite,
-          height: (runs.length * 70.0).clamp(80.0, 370.0),
-          child: ListView.builder(
-            itemCount: runs.length,
-            itemBuilder: (_, index) {
-              final stem = runs[index];
-              final count = segments.where((x) => segmentRun(x) == stem).length;
-              return ListTile(
-                title: Text('Attempt ${runs.length - index}'),
-                subtitle: Text('${runDate(stem)} · $count segments'),
-                onTap: () => Navigator.pop(ctx, stem),
-              );
-            },
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Choose recovery attempts'),
+          content: SizedBox(
+            width: double.maxFinite,
+            height: (runs.length * 68.0 + 105).clamp(190.0, 400.0),
+            child: Column(children: [
+              const Text('Select every attempt that contains footage '
+                  'from the recording you want to rebuild.'),
+              Row(children: [
+                TextButton(
+                  onPressed: () => setDialogState(
+                      () => selectedRuns.addAll(runs)),
+                  child: const Text('Select all'),
+                ),
+                TextButton(
+                  onPressed: () => setDialogState(selectedRuns.clear),
+                  child: const Text('Clear'),
+                ),
+              ]),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: runs.length,
+                  itemBuilder: (_, index) {
+                    final stem = runs[index];
+                    final count = segments
+                        .where((x) => segmentRun(x) == stem).length;
+                    return CheckboxListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      controlAffinity: ListTileControlAffinity.leading,
+                      value: selectedRuns.contains(stem),
+                      title: Text('Attempt ${runs.length - index}'),
+                      subtitle: Text('${runDate(stem)} · $count segments'),
+                      onChanged: (checked) => setDialogState(() {
+                        if (checked == true) {
+                          selectedRuns.add(stem);
+                        } else {
+                          selectedRuns.remove(stem);
+                        }
+                      }),
+                    );
+                  },
+                ),
+              ),
+            ]),
           ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel')),
+            FilledButton(
+              onPressed: selectedRuns.isEmpty ? null :
+                  () => Navigator.pop(ctx, Set<String>.from(selectedRuns)),
+              child: Text('Reconstruct (${selectedRuns.length})'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel')),
-        ],
       ),
     );
-    if (!mounted || chosen == null) return;
+    if (!mounted || chosen == null || chosen.isEmpty) return;
+    final picked = segments.where(
+        (x) => chosen.contains(segmentRun(x))).toList();
+    final attemptNumbers = <String, int>{
+      for (var i = 0; i < runs.length; i++)
+        runs[i]: runs.length - i,
+    };
     await Navigator.push<void>(context, MaterialPageRoute<void>(
-      builder: (_) => ReconstructionEditor(segmentPaths: segments
-          .where((x) => segmentRun(x) == chosen).toList()),
+      builder: (_) => ReconstructionEditor(
+        segmentPaths: picked,
+        attemptNumbers: attemptNumbers,
+      ),
     ));
     if (mounted) unawaited(refresh());
   }

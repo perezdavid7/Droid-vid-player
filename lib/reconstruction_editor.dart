@@ -37,7 +37,13 @@ class _Piece {
 /// A saved edit decision list; video sources are never overwritten or moved.
 class ReconstructionEditor extends StatefulWidget {
   final List<String> segmentPaths;
-  const ReconstructionEditor({super.key, required this.segmentPaths});
+  /// Attempt numbers shown in Saved Recoveries, keyed by recovery-run stem.
+  final Map<String, int> attemptNumbers;
+  const ReconstructionEditor({
+    super.key,
+    required this.segmentPaths,
+    this.attemptNumbers = const {},
+  });
   @override
   State<ReconstructionEditor> createState() => _ReconstructionEditorState();
 }
@@ -67,8 +73,14 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
     return number == null ? 0 : number + 1;
   }
 
-  String _segmentLabel(String path) =>
-      'Segment ${_segmentNumber(path)}';
+  String _segmentRun(String path) =>
+      path.replaceFirst(RegExp(r'\.segment_\d+\.mkv$'), '');
+
+  String _segmentLabel(String path) {
+    final attempt = widget.attemptNumbers[_segmentRun(path)];
+    final prefix = attempt == null ? '' : 'Attempt $attempt · ';
+    return '${prefix}Segment ${_segmentNumber(path)}';
+  }
 
   String _pieceLabel(_Piece piece) {
     final siblings = _pieces.where((x) => x.path == piece.path).toList()
@@ -80,6 +92,10 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
   List<String> get _sourceSegments {
     final paths = _pieces.map((x) => x.path).toSet().toList();
     paths.sort((a, b) {
+      final attemptA = widget.attemptNumbers[_segmentRun(a)] ?? 0;
+      final attemptB = widget.attemptNumbers[_segmentRun(b)] ?? 0;
+      final attemptOrder = attemptA.compareTo(attemptB);
+      if (attemptOrder != 0) return attemptOrder;
       final numberOrder = _segmentNumber(a).compareTo(_segmentNumber(b));
       return numberOrder != 0 ? numberOrder : a.compareTo(b);
     });
@@ -142,8 +158,26 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
         (await getApplicationDocumentsDirectory()).path,
         'DroidVidRecoveryProjects'));
     await dir.create(recursive: true);
-    final root = p.basename(widget.segmentPaths.first)
-        .replaceFirst(RegExp(r'\.segment_\d+\.mkv$'), '');
+    final roots = widget.segmentPaths.map(_segmentRun).toSet().toList()
+      ..sort();
+    // Keep the original single-attempt project name so existing edits load.
+    // Combined attempts get their own stable project, without overwriting
+    // edits previously saved for any individual recovery attempt.
+    String root;
+    if (roots.length == 1) {
+      root = p.basename(roots.first);
+    } else {
+      final identity = roots.join('|');
+      var hashA = 0x811c9dc5;
+      var hashB = 5381;
+      for (final unit in identity.codeUnits) {
+        hashA = ((hashA ^ unit) * 0x01000193) & 0xffffffff;
+        hashB = ((hashB * 33) ^ unit) & 0xffffffff;
+      }
+      root = 'combined_${roots.length}_'
+          '${hashA.toRadixString(16).padLeft(8, '0')}_'
+          '${hashB.toRadixString(16).padLeft(8, '0')}';
+    }
     return File(p.join(dir.path, '$root.reconstruction.json'));
   }
 
@@ -206,17 +240,18 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
           }
         } catch (_) {}
       }
-      if (_pieces.isEmpty) {
-        for (final file in sources) {
-          final length = _lengths[file] ?? 0;
-          if (length > 500) {
-            _pieces.add(_Piece(_nextId++, file, 0, length, 1));
-          }
-        }
-      }
       for (final piece in _pieces) {
         if (piece.id >= _nextId) _nextId = piece.id + 1;
         _groups.putIfAbsent(piece.group, () => 'Recording ${piece.group}');
+      }
+      // Newly recovered segments are added to existing projects without
+      // disturbing previously saved cuts, exclusions or recording order.
+      final loadedPaths = _pieces.map((piece) => piece.path).toSet();
+      for (final file in sources) {
+        final length = _lengths[file] ?? 0;
+        if (length > 500 && loadedPaths.add(file)) {
+          _pieces.add(_Piece(_nextId++, file, 0, length, 1));
+        }
       }
       if (mounted) setState(() => _loading = false);
       if (_pieces.isNotEmpty) await _open(_pieces.first);
@@ -780,6 +815,13 @@ class _ReconstructionEditorState extends State<ReconstructionEditor> {
                   'pieces. Original segments are never modified.'),
               const Text('Tap Preview or Play to float the video over '
                   'the lists. Drag its title bar to move it.'),
+              if (widget.segmentPaths.map(_segmentRun).toSet().length > 1)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text('Multiple recovery attempts are open together. '
+                      'Assign pieces from any attempt to the same recording '
+                      'and change their order before exporting.'),
+                ),
               _segmentNavigator(),
               const SizedBox(height: 12),
               _preview(),
