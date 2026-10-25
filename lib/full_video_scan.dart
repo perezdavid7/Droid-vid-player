@@ -27,6 +27,9 @@ class FullRecoveryJob {
   final bool legacyMpeg;
   final List<int> prefixBytes;
   final String? reconstruction;
+  final int? guessedWidth;
+  final int? guessedHeight;
+  final int? guessedTimeBase;
 
   const FullRecoveryJob({
     required this.startByte,
@@ -38,6 +41,9 @@ class FullRecoveryJob {
     required this.legacyMpeg,
     this.prefixBytes = const [],
     this.reconstruction,
+    this.guessedWidth,
+    this.guessedHeight,
+    this.guessedTimeBase,
     this.startSeconds,
     this.endSeconds,
     this.totalSeconds,
@@ -133,6 +139,9 @@ class FullVideoScan {
               legacyMpeg: false,
               prefixBytes: region.prefixBytes,
               reconstruction: region.reconstruction,
+              guessedWidth: region.guessedWidth,
+              guessedHeight: region.guessedHeight,
+              guessedTimeBase: region.guessedTimeBase,
             ),
         ],
       );
