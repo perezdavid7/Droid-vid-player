@@ -25,6 +25,8 @@ class FullRecoveryJob {
   final String inputFormat;
   final String inputExtension;
   final bool legacyMpeg;
+  final List<int> prefixBytes;
+  final String? reconstruction;
 
   const FullRecoveryJob({
     required this.startByte,
@@ -34,6 +36,8 @@ class FullRecoveryJob {
     required this.inputFormat,
     required this.inputExtension,
     required this.legacyMpeg,
+    this.prefixBytes = const [],
+    this.reconstruction,
     this.startSeconds,
     this.endSeconds,
     this.totalSeconds,
@@ -127,6 +131,8 @@ class FullVideoScan {
               inputFormat: region.inputFormat,
               inputExtension: region.extension,
               legacyMpeg: false,
+              prefixBytes: region.prefixBytes,
+              reconstruction: region.reconstruction,
             ),
         ],
       );

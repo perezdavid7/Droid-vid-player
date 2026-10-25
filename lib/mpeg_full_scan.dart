@@ -176,9 +176,12 @@ class MpegFullScan {
   static Future<void> copyByteRange(
     File source, File destination, int start, int end, {
     required bool Function() isCancelled,
+    List<int> prefixBytes = const [],
   }) async {
     final sink = destination.openWrite();
     try {
+      if (isCancelled()) throw const MpegScanCancelled();
+      if (prefixBytes.isNotEmpty) sink.add(prefixBytes);
       await for (final bytes in source.openRead(start, end)) {
         if (isCancelled()) throw const MpegScanCancelled();
         sink.add(bytes);
