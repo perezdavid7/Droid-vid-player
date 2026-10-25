@@ -325,6 +325,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             await MpegFullScan.copyByteRange(
               source, temporary, region.startByte, region.endByte,
               isCancelled: () => _cancelScan,
+              prefixBytes: region.prefixBytes,
             );
           }
           if (_cancelScan) throw const MpegScanCancelled();
@@ -421,6 +422,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             'Source: ${widget.sourcePath}\n'
             'Scanner: ${scanResult.scanner}\n'
             '${region.location}\n'
+            'Reconstructed VOL: ${region.reconstruction ?? "none"}\n'
             'Position: $label\n'
             'Selected stream: ${region.videoStream}\n'
             'Result: ${verified.length} verified / ${clips.length} output clips\n'
