@@ -111,9 +111,17 @@ class FullVideoScan {
     }
 
     final extension = p.extension(path).toLowerCase();
-    if (forceMp4Salvage && !identification.isMp4Family) {
-      throw StateError('Experimental unfinished-MP4 salvage requires '
-          'a recognized MP4/ISO media container.');
+    // Explicit raw salvage may examine an MP4/MOV whose opening ftyp bytes
+    // were destroyed. The extension is not proof of recovered footage:
+    // candidates must still have recognizable markers and decoded frames.
+    final headerlessMp4Candidate = identification.category == 'unknown' &&
+        const {'.mp4', '.m4v', '.mov', '.3gp'}.contains(extension);
+    if (forceMp4Salvage &&
+        !identification.isMp4Family && !headerlessMp4Candidate) {
+      throw StateError('Unfinished MP4 salvage requires an MP4/ISO '
+          'container or an unrecognized MP4-family source for raw '
+          'scanning. The selected file was identified as '
+          '${identification.format}.');
     }
     if (forceMp4Salvage ||
         (identification.isMp4Family && identification.hasMdat &&
@@ -124,7 +132,9 @@ class FullVideoScan {
         onProbeProgress: onProbeProgress,
       );
       return FullScanResult(
-        scanner: 'Unfinished MP4 (experimental raw-video salvage)',
+        scanner: headerlessMp4Candidate
+            ? 'Unfinished MP4 (headerless raw-video scan)'
+            : 'Unfinished MP4 (experimental raw-video salvage)',
         explanation: attempt.explanation,
         exactByteRanges: true,
         jobs: [

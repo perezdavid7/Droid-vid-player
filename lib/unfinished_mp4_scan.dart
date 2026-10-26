@@ -410,15 +410,16 @@ class UnfinishedMp4Scan {
     final file = File(path);
     final size = await file.length();
     final mdats = await _mdatRanges(file, size, isCancelled);
-    if (mdats.isEmpty) {
-      onByteProgress?.call(1);
-      return const UnfinishedMp4Result([],
-          'No valid top-level mdat box was found. Raw MP4 recovery '
-          'cannot be started from this source.');
-    }
-
+    // An interrupted MP4 can lose the ftyp and mdat box headers while
+    // preserving elementary video data. Scan all bytes as raw data in that
+    // case; signature hits never count as recovered clips until decoding
+    // verifies them.
+    final headerlessFallback = mdats.isEmpty;
+    final sourceRanges = headerlessFallback
+        ? <_Mp4DataRange>[_Mp4DataRange(0, size)]
+        : mdats;
     final windows = <_Mp4DataRange>[];
-    for (final region in mdats) {
+    for (final region in sourceRanges) {
       var offset = region.start;
       while (offset < region.end) {
         final end = math.min(region.end, offset + _maxRangeBytes);
@@ -658,11 +659,17 @@ class UnfinishedMp4Scan {
     final guessSummary = winningGuesses.isEmpty
         ? ''
         : 'Winning guesses: ${winningGuesses.take(4).join('; ')}. ';
+    final sourceExplanation = headerlessFallback
+        ? 'No validated top-level mdat box chain survived. Scanned all '
+          'source bytes (0–100%) as unindexed raw video in '
+          '${windows.length} bounded window(s); decoder verification is '
+          'required and no container metadata is assumed. '
+        : 'Found ${mdats.length} mdat box(es) '
+          '(${mdats.where((range) => range.truncated).length} truncated '
+          'at EOF) and inspected all ${windows.length} bounded '
+          'media-data window(s). ';
     return UnfinishedMp4Result(nonOverlapping,
-        'Found ${mdats.length} mdat box(es) '
-        '(${mdats.where((range) => range.truncated).length} truncated at EOF) '
-        'and inspected '
-        'all ${windows.length} bounded media-data window(s). '
+        '$sourceExplanation'
         'MPEG-4 Visual markers: $totalVol VOL, $totalVop VOP; '
         'Annex-B candidate SPS: H.264=$totalH264, H.265=$totalH265. '
         'Identified $discovered potential bounded sections; tested '
