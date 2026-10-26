@@ -189,13 +189,17 @@ class _SmallMp4Forensics {
         offset - at < 16 * 1024 * 1024) {
       final length = _be32(data, offset);
       if (length < 2 || length > _maxNal ||
-          length > data.length - offset - 4) break;
+          length > data.length - offset - 4) {
+        break;
+      }
       final header = data[offset + 4];
       if ((header & 0x80) != 0) break;
       if (hevc) {
         final type = (header >> 1) & 0x3f;
         if ((data[offset + 5] & 7) == 0 ||
-            !(type <= 35 || type == 39 || type == 40)) break;
+            !(type <= 35 || type == 39 || type == 40)) {
+          break;
+        }
         if (type <= 31) slices++;
         if (type >= 16 && type <= 21) keys++;
         if (type == 32) vps++;
@@ -205,7 +209,9 @@ class _SmallMp4Forensics {
         final type = header & 0x1f;
         if (!(type == 1 || type == 5 || type == 6 ||
             type == 7 || type == 8 || type == 9 ||
-            type == 10 || type == 11 || type == 12)) break;
+            type == 10 || type == 11 || type == 12)) {
+          break;
+        }
         if (type == 1 || type == 5) slices++;
         if (type == 5) keys++;
         if (type == 7) sps++;
@@ -245,7 +251,9 @@ class _SmallMp4Forensics {
       // exists; the surrounding metadata may have been shifted.
       final first = bytes[i + 4];
       if (first != 0x66 && first != 0x6d &&
-          first != 0x61 && first != 0x68) continue;
+          first != 0x61 && first != 0x68) {
+        continue;
+      }
       final kind = String.fromCharCodes(bytes.sublist(i + 4, i + 8));
       if (!atoms.containsKey(kind)) continue;
       final declared = _be32(bytes, i);
@@ -268,7 +276,9 @@ class _SmallMp4Forensics {
         if (bytes[i] != 0 || bytes[i + 1] > 64) continue;
         final length = _be32(bytes, i);
         if (length < 2 || length > _maxNal ||
-            length > bytes.length - i - 4) continue;
+            length > bytes.length - i - 4) {
+          continue;
+        }
         final found = _run(bytes, i, hevc);
         if (found == null) continue;
         if (hevc) {
