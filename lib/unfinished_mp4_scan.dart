@@ -156,6 +156,173 @@ class _RawMarkers {
   }
 }
 
+
+class _NalEvidence {
+  final int end;
+  final int units;
+  final int slices;
+  final int keyframes;
+  final int sps;
+  final int pps;
+  final int vps;
+  const _NalEvidence(this.end, this.units, this.slices,
+      this.keyframes, this.sps, this.pps, this.vps);
+}
+
+/// A diagnostic-only search: a missing ISO-BMFF sample table means a four-byte
+/// NAL length can be mistaken for arbitrary compressed data. We only report
+/// sustained, internally consistent chains, never recover them without a
+/// successful decoder probe and a codec configuration.
+class _SmallMp4Forensics {
+  static const _limit = 24 * 1024 * 1024;
+  static const _maxNal = 4 * 1024 * 1024;
+
+  static int _be32(Uint8List bytes, int at) =>
+      (bytes[at] << 24) | (bytes[at + 1] << 16) |
+      (bytes[at + 2] << 8) | bytes[at + 3];
+
+  static _NalEvidence? _run(Uint8List data, int at, bool hevc) {
+    var offset = at;
+    var count = 0, slices = 0, keys = 0, sps = 0, pps = 0, vps = 0;
+    // Limit the work per candidate; do not trust random length fields.
+    while (offset + 6 <= data.length && count < 512 &&
+        offset - at < 16 * 1024 * 1024) {
+      final length = _be32(data, offset);
+      if (length < 2 || length > _maxNal ||
+          length > data.length - offset - 4) break;
+      final header = data[offset + 4];
+      if ((header & 0x80) != 0) break;
+      if (hevc) {
+        final type = (header >> 1) & 0x3f;
+        if ((data[offset + 5] & 7) == 0 ||
+            !(type <= 35 || type == 39 || type == 40)) break;
+        if (type <= 31) slices++;
+        if (type >= 16 && type <= 21) keys++;
+        if (type == 32) vps++;
+        if (type == 33) sps++;
+        if (type == 34) pps++;
+      } else {
+        final type = header & 0x1f;
+        if (!(type == 1 || type == 5 || type == 6 ||
+            type == 7 || type == 8 || type == 9 ||
+            type == 10 || type == 11 || type == 12)) break;
+        if (type == 1 || type == 5) slices++;
+        if (type == 5) keys++;
+        if (type == 7) sps++;
+        if (type == 8) pps++;
+      }
+      count++;
+      offset += 4 + length;
+    }
+    // Guard against a few coincidental byte patterns.
+    if (count < 4 || slices < 2 || offset - at < 4096) return null;
+    return _NalEvidence(offset, count, slices, keys, sps, pps, vps);
+  }
+
+  static Future<String> inspect(File file, int size,
+      bool Function() isCancelled) async {
+    if (size > _limit) {
+      return 'Additional length-prefixed NAL inspection was skipped '
+          '(source exceeds the 24 MiB diagnostic limit). ';
+    }
+    if (isCancelled()) throw const MpegScanCancelled();
+    final bytes = await file.readAsBytes();
+    final atoms = <String, int>{
+      'ftyp': 0, 'moov': 0, 'mdat': 0, 'moof': 0,
+      'avcC': 0, 'hvcC': 0,
+    };
+    var zeros = 0;
+    var ff = 0;
+    for (var i = 0; i < bytes.length; i++) {
+      if ((i & 0x3ffff) == 0 && isCancelled()) {
+        throw const MpegScanCancelled();
+      }
+      if (bytes[i] == 0) zeros++;
+      if (bytes[i] == 255) ff++;
+      if (i + 8 > bytes.length) continue;
+      // A genuine ISO box has a big-endian size preceding its type.
+      // Count only plausible-size candidates, even if no top-level chain
+      // exists; the surrounding metadata may have been shifted.
+      final first = bytes[i + 4];
+      if (first != 0x66 && first != 0x6d &&
+          first != 0x61 && first != 0x68) continue;
+      final kind = String.fromCharCodes(bytes.sublist(i + 4, i + 8));
+      if (!atoms.containsKey(kind)) continue;
+      final declared = _be32(bytes, i);
+      final plausible = declared == 0 || declared == 1 ||
+          (declared >= 8 && declared <= bytes.length - i);
+      if (plausible) atoms[kind] = atoms[kind]! + 1;
+    }
+    var avcChains = 0, hevcChains = 0;
+    var avcUnits = 0, hevcUnits = 0;
+    var avcSlices = 0, hevcSlices = 0;
+    var avcSps = 0, avcPps = 0, hevcVps = 0, hevcSps = 0, hevcPps = 0;
+    var avcKeys = 0, hevcKeys = 0;
+    for (final hevc in [false, true]) {
+      for (var i = 0; i + 6 < bytes.length; i++) {
+        if ((i & 0x3ffff) == 0 && isCancelled()) {
+          throw const MpegScanCancelled();
+        }
+        // Normal four-byte NAL lengths for short recordings are small
+        // compared to 2^32. This screen limits files to 24 MiB.
+        if (bytes[i] != 0 || bytes[i + 1] > 64) continue;
+        final length = _be32(bytes, i);
+        if (length < 2 || length > _maxNal ||
+            length > bytes.length - i - 4) continue;
+        final found = _run(bytes, i, hevc);
+        if (found == null) continue;
+        if (hevc) {
+          hevcChains++;
+          hevcUnits += found.units;
+          hevcSlices += found.slices;
+          hevcKeys += found.keyframes;
+          hevcVps += found.vps;
+          hevcSps += found.sps;
+          hevcPps += found.pps;
+        } else {
+          avcChains++;
+          avcUnits += found.units;
+          avcSlices += found.slices;
+          avcKeys += found.keyframes;
+          avcSps += found.sps;
+          avcPps += found.pps;
+        }
+        // A recovered run must not be counted again at an inner NAL unit.
+        i = found.end - 1;
+      }
+    }
+    final total = bytes.length;
+    final zeroPercent = total == 0 ? 0 : (100 * zeros / total).round();
+    final ffPercent = total == 0 ? 0 : (100 * ff / total).round();
+    final atomText = atoms.entries
+        .map((entry) => '${entry.key}=${entry.value}').join(', ');
+    final hints = avcChains + hevcChains > 0
+        ? 'Possible four-byte length-prefixed NAL sequences detected. '
+          'AVC/H.264: $avcChains chain(s), $avcUnits units, '
+          '$avcSlices slice(s), $avcKeys keyframe marker(s), '
+          '$avcSps SPS / $avcPps PPS. '
+          'HEVC/H.265: $hevcChains chain(s), $hevcUnits units, '
+          '$hevcSlices slice(s), $hevcKeys keyframe marker(s), '
+          '$hevcVps VPS / $hevcSps SPS / $hevcPps PPS. '
+          'These patterns are not proof of playable video: '
+          'missing codec configuration or sample boundaries can '
+          'still prevent decoding. '
+        : 'No sustained four-byte length-prefixed AVC/HEVC NAL '
+          'sequences were identified either. This does not rule out '
+          'other codecs, other length-prefix sizes, fragmented '
+          'data, or encrypted content. ';
+    final uniform = zeroPercent >= 95 || ffPercent >= 95
+        ? 'Most bytes are identical ($zeroPercent% zero, '
+          '$ffPercent% 0xFF); the source may contain little '
+          'usable compressed video data. '
+        : 'Byte fill: $zeroPercent% zero, $ffPercent% 0xFF. ';
+    return 'Small-file forensic inspection ($total bytes): '
+        'plausible MP4 box signatures: $atomText. '
+        '$hints$uniform'
+        'No recovery clip is produced solely from signature matches. ';
+  }
+}
+
 /// Experimental salvage for MP4 files whose media-data box survived but
 /// whose movie index (moov) is absent. It never rewrites the source or
 /// recreates the lost sample tables. When MPEG-4 Visual VOPs lack a VOL,
@@ -656,6 +823,9 @@ class UnfinishedMp4Scan {
       nonOverlapping.add(candidate);
     }
 
+    final forensicExplanation = nonOverlapping.isEmpty
+        ? await _SmallMp4Forensics.inspect(file, size, isCancelled)
+        : '';
     final guessSummary = winningGuesses.isEmpty
         ? ''
         : 'Winning guesses: ${winningGuesses.take(4).join('; ')}. ';
@@ -679,7 +849,8 @@ class UnfinishedMp4Scan {
         '$cachedSelections prior or session-success settings reused, '
         '$alternateStarts alternate keyframe starts tried. '
         '$guessSummary'
-        'These candidates decoded enough frames to attempt extraction. '
+        '$forensicExplanation'
+        '${nonOverlapping.isEmpty ? 'No section passed decoder verification. ' : 'Verified candidates decoded enough frames to attempt extraction. '}'
         'This experimental scanner '
         'recovers video only, with approximate timing and no audio. '
         'Guessed headers are not original metadata: preview reconstructed '
