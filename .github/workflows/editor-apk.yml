@@ -1,0 +1,118 @@
+name: Build Droid Vid Editor APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [droid-vid-editor]
+    paths:
+      - 'lib/**'
+      - 'android/**'
+      - 'pubspec.yaml'
+      - 'scripts/**'
+      - '.github/workflows/editor-apk.yml'
+  pull_request:
+    paths:
+      - 'lib/**'
+      - 'android/**'
+      - 'pubspec.yaml'
+      - 'scripts/**'
+      - '.github/workflows/editor-apk.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Flutter stable
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Flutter version
+        run: flutter --version
+      - name: Generate Android runner
+        run: flutter create --platforms=android --project-name=droid_vid_editor --org com.perezdavid .
+      - name: Remove Flutter template test
+        run: rm -f test/widget_test.dart
+      - name: Fetch packages
+        run: flutter pub get
+      - name: Analyze
+        run: flutter analyze
+      - name: Prepare Android NDK (retry damaged downloads)
+        shell: bash
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          sdkmanager="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          ndk_version="28.2.13676358"
+          ndk_dir="$sdk_root/ndk/$ndk_version"
+          if [[ -f "$ndk_dir/source.properties" ]]; then
+            echo "Android NDK $ndk_version is already available."
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            echo "Installing Android NDK $ndk_version (attempt $attempt of 3)"
+            rm -rf "$ndk_dir"
+            if "$sdkmanager" --sdk_root="$sdk_root" "ndk;$ndk_version" \
+              && [[ -f "$ndk_dir/source.properties" ]]; then
+              echo "Android NDK installed successfully."
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              echo "::warning::NDK installation failed; retrying a fresh download."
+              sleep $((attempt * 5))
+            fi
+          done
+          echo "::error::Unable to install Android NDK after 3 attempts."
+          exit 1
+      - name: Restore private app signing certificate
+        shell: bash
+        env:
+          SIGNING_JKS_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SIGNING_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [[ -n "$SIGNING_JKS_BASE64" && -n "$SIGNING_PASSWORD" && -n "$SIGNING_ALIAS" ]]; then
+            printf '%s' "$SIGNING_JKS_BASE64" | base64 --decode > android/app/droid-release.jks
+            chmod 600 android/app/droid-release.jks
+            {
+              printf 'storePassword=%s\n' "$SIGNING_PASSWORD"
+              printf 'keyPassword=%s\n' "$SIGNING_PASSWORD"
+              printf 'keyAlias=%s\n' "$SIGNING_ALIAS"
+              printf 'storeFile=droid-release.jks\n'
+            } > android/key.properties
+            chmod 600 android/key.properties
+            echo 'DROID_SIGNING_CONFIGURED=true' >> "$GITHUB_ENV"
+            echo 'Stable signing key present: building an updateable release APK.'
+          elif [[ -n "$SIGNING_JKS_BASE64" || -n "$SIGNING_PASSWORD" || -n "$SIGNING_ALIAS" ]]; then
+            echo '::error::Signing secrets incomplete. Configure ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS together.'
+            exit 1
+          else
+            echo 'DROID_SIGNING_CONFIGURED=false' >> "$GITHUB_ENV"
+            echo '::warning::Persistent signing not configured. Debug APK will not update prior builds with other signing keys.'
+          fi
+      - name: Build signed APK (release) or temporary debug APK
+        shell: bash
+        run: |
+          if [[ "$DROID_SIGNING_CONFIGURED" == 'true' ]]; then
+            python3 scripts/configure_android_signing.py
+            flutter build apk --release --target lib/editor_main.dart --build-number="$GITHUB_RUN_NUMBER"
+          else
+            flutter build apk --debug --target lib/editor_main.dart --build-number="$GITHUB_RUN_NUMBER"
+          fi
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Droid-Vid-Editor-Android-APK
+          path: build/app/outputs/flutter-apk/app-*.apk
+          if-no-files-found: error
+          retention-days: 14

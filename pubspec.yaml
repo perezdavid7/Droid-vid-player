@@ -1,5 +1,5 @@
-name: droid_vid_player
-description: Offline cross-platform video player (early development).
+name: droid_vid_editor
+description: Offline non-destructive Android video editor, early development.
 publish_to: none
 version: 0.1.0+1
 
