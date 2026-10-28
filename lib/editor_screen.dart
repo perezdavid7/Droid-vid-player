@@ -698,7 +698,9 @@ class _EditorScreenState extends State<EditorScreen> {
     if (_busy) return;
     final video = _player;
     if (!clip.isImage &&
-        (video == null || !video.value.isInitialized)) return;
+        (video == null || !video.value.isInitialized)) {
+      return;
+    }
     final aspect = clip.isImage
         ? clip.imageWidth / clip.imageHeight
         : video!.value.aspectRatio;
