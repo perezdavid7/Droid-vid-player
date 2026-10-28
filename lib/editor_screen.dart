@@ -2,6 +2,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
 import 'package:ffmpeg_kit_flutter_new_min/ffprobe_kit.dart';
@@ -15,7 +16,8 @@ import 'package:video_player/video_player.dart';
 
 class EditorClip {
   EditorClip(this.id, this.path, this.name, this.length, this.start, this.end,
-      {this.turns = 0, this.zoom = 1, this.x = 0.5, this.y = 0.5});
+      {this.turns = 0, this.zoom = 1, this.x = 0.5, this.y = 0.5,
+      this.isImage = false, this.imageWidth = 0, this.imageHeight = 0});
   final int id;
   final String path;
   final String name;
@@ -26,15 +28,20 @@ class EditorClip {
   double zoom;
   double x;
   double y;
+  final bool isImage;
+  final int imageWidth;
+  final int imageHeight;
 
   EditorClip duplicate(int newId) =>
       EditorClip(newId, path, name, length, start, end,
-          turns: turns, zoom: zoom, x: x, y: y);
+          turns: turns, zoom: zoom, x: x, y: y,
+          isImage: isImage, imageWidth: imageWidth, imageHeight: imageHeight);
 
   Map<String, Object> toJson() => {
     'id': id, 'path': path, 'name': name, 'length': length,
     'start': start, 'end': end, 'turns': turns, 'zoom': zoom,
-    'x': x, 'y': y,
+    'x': x, 'y': y, 'isImage': isImage,
+    'imageWidth': imageWidth, 'imageHeight': imageHeight,
   };
 
   factory EditorClip.fromJson(Map<String, dynamic> data) => EditorClip(
@@ -48,6 +55,9 @@ class EditorClip {
     zoom: (data['zoom'] as num?)?.toDouble() ?? 1,
     x: (data['x'] as num?)?.toDouble() ?? 0.5,
     y: (data['y'] as num?)?.toDouble() ?? 0.5,
+    isImage: data['isImage'] == true,
+    imageWidth: (data['imageWidth'] as num?)?.toInt() ?? 0,
+    imageHeight: (data['imageHeight'] as num?)?.toInt() ?? 0,
   );
 }
 
@@ -60,6 +70,7 @@ class EditorScreen extends StatefulWidget {
 class _EditorScreenState extends State<EditorScreen> {
   final _clips = <EditorClip>[];
   VideoPlayerController? _player;
+  Timer? _photoTimer;
   int? _activeId;
   int _at = 0;
   int _nextId = 1;
@@ -67,8 +78,11 @@ class _EditorScreenState extends State<EditorScreen> {
   int? _sessionId;
   bool _busy = false;
   bool _cancelled = false;
+  bool _playingSequence = false;
+  bool _transitioning = false;
+  int? _scrubMs;
   String _ratio = '16:9';
-  String _message = 'Import local videos to start. Originals stay untouched.';
+  String _message = 'Import photos or videos. Originals stay untouched.';
   String? _error;
   int _panel = 0;
   double _gestureStartZoom = 1;
@@ -78,6 +92,25 @@ class _EditorScreenState extends State<EditorScreen> {
       if (c.id == _activeId) return c;
     }
     return null;
+  }
+
+  int get _timelineLength =>
+      _clips.fold<int>(0, (sum, c) => sum + c.end - c.start);
+
+  int _clipOffset(EditorClip clip) {
+    var elapsed = 0;
+    for (final item in _clips) {
+      if (item.id == clip.id) return elapsed;
+      elapsed += item.end - item.start;
+    }
+    return 0;
+  }
+
+  int get _timelineAt {
+    final clip = _active;
+    if (clip == null) return 0;
+    return _clipOffset(clip) +
+        (_at - clip.start).clamp(0, clip.end - clip.start);
   }
 
   String _time(int ms) {
@@ -154,25 +187,35 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   void dispose() {
     _generation++;
+    _photoTimer?.cancel();
     _player?.removeListener(_watch);
     final old = _player;
     if (old != null) unawaited(old.dispose());
     super.dispose();
   }
 
-  Future<void> _open(EditorClip clip) async {
+  Future<void> _open(EditorClip clip,
+      {int? position, bool autoplay = false}) async {
     if (_busy) return;
     final generation = ++_generation;
+    _playingSequence = autoplay;
+    _photoTimer?.cancel();
+    _photoTimer = null;
     final old = _player;
     _player = null;
     old?.removeListener(_watch);
     if (old != null) await old.dispose();
     if (!mounted || generation != _generation) return;
+    final target = (position ?? clip.start).clamp(clip.start, clip.end);
     setState(() {
       _activeId = clip.id;
-      _at = clip.start;
+      _at = target;
       _error = null;
     });
+    if (clip.isImage) {
+      if (autoplay) _startPhotoPlayback();
+      return;
+    }
     final next = VideoPlayerController.file(File(clip.path));
     try {
       await next.initialize().timeout(const Duration(seconds: 25));
@@ -180,10 +223,15 @@ class _EditorScreenState extends State<EditorScreen> {
         await next.dispose();
         return;
       }
-      await next.seekTo(Duration(milliseconds: clip.start));
+      await next.seekTo(Duration(milliseconds: target));
       next.addListener(_watch);
       setState(() => _player = next);
+      if (autoplay) {
+        await next.play();
+        if (mounted && generation == _generation) setState(() {});
+      }
     } catch (error) {
+      _playingSequence = false;
       await next.dispose();
       if (mounted && generation == _generation) {
         setState(() => _error = 'Preview failed: $error');
@@ -191,16 +239,67 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
+  void _startPhotoPlayback() {
+    final clip = _active;
+    if (clip == null || !clip.isImage || !_playingSequence) return;
+    _photoTimer?.cancel();
+    final began = DateTime.now();
+    final startingAt = _at;
+    _photoTimer = Timer.periodic(const Duration(milliseconds: 70), (timer) {
+      if (!mounted || !_playingSequence || _activeId != clip.id) {
+        timer.cancel();
+        if (_photoTimer == timer) _photoTimer = null;
+        return;
+      }
+      final at = startingAt + DateTime.now().difference(began).inMilliseconds;
+      if (at >= clip.end) {
+        timer.cancel();
+        if (_photoTimer == timer) _photoTimer = null;
+        if (!_transitioning) {
+          _transitioning = true;
+          unawaited(_advanceSequence());
+        }
+      } else {
+        setState(() => _at = at);
+      }
+    });
+    if (mounted) setState(() {});
+  }
+
   void _watch() {
     final clip = _active;
     final player = _player;
     if (!mounted || clip == null || player == null) return;
     final current = player.value.position.inMilliseconds;
+    if (_playingSequence && !_transitioning &&
+        (current >= clip.end - 45 || player.value.isCompleted)) {
+      _transitioning = true;
+      unawaited(_advanceSequence());
+      return;
+    }
     if (current >= clip.end && player.value.isPlaying) {
       unawaited(player.pause());
     }
-    if ((current - _at).abs() >= 100) {
+    if ((current - _at).abs() >= 80) {
       setState(() => _at = current.clamp(clip.start, clip.end));
+    }
+  }
+
+  Future<void> _advanceSequence() async {
+    try {
+      final index = _clips.indexWhere((c) => c.id == _activeId);
+      if (!_playingSequence || index < 0) return;
+      if (index == _clips.length - 1) {
+        _playingSequence = false;
+        _photoTimer?.cancel();
+        _photoTimer = null;
+        await _player?.pause();
+        if (mounted) setState(() => _at = _clips[index].end);
+        return;
+      }
+      await _open(_clips[index + 1], autoplay: true);
+    } finally {
+      _transitioning = false;
     }
   }
 
@@ -213,6 +312,63 @@ class _EditorScreenState extends State<EditorScreen> {
     await player.seekTo(Duration(milliseconds: actual));
   }
 
+  bool get _isPreviewPlaying =>
+      _active?.isImage == true
+          ? _photoTimer != null
+          : (_player?.value.isPlaying ?? false);
+
+  void _pausePreview() {
+    _playingSequence = false;
+    _photoTimer?.cancel();
+    _photoTimer = null;
+    final player = _player;
+    if (player != null) unawaited(player.pause());
+  }
+
+  Future<void> _seekTimeline(int target) async {
+    if (_busy || _clips.isEmpty) return;
+    final wasPlaying = _playingSequence && _isPreviewPlaying;
+    var remaining = target.clamp(0, _timelineLength);
+    for (var i = 0; i < _clips.length; i++) {
+      final clip = _clips[i];
+      final duration = clip.end - clip.start;
+      if (remaining < duration || i == _clips.length - 1) {
+        final sourcePosition = clip.start + remaining.clamp(0, duration);
+        if (clip.id == _activeId &&
+            (clip.isImage || _player != null)) {
+          if (clip.isImage) {
+            setState(() => _at = sourcePosition);
+            if (wasPlaying) _startPhotoPlayback();
+          } else {
+            await _seek(sourcePosition);
+          }
+        } else {
+          await _open(clip, position: sourcePosition, autoplay: wasPlaying);
+        }
+        return;
+      }
+      remaining -= duration;
+    }
+  }
+
+  Future<void> _togglePlayback() async {
+    final clip = _active;
+    if (clip == null || _busy) return;
+    if (_isPreviewPlaying) {
+      _pausePreview();
+    } else if (_timelineAt >= _timelineLength - 60 && _clips.isNotEmpty) {
+      await _open(_clips.first, autoplay: true);
+    } else {
+      _playingSequence = true;
+      if (clip.isImage) {
+        _startPhotoPlayback();
+      } else {
+        await _player?.play();
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
   Future<void> _import() async {
     if (_busy) return;
     final chosen = await FilePicker.pickFiles(
@@ -220,6 +376,7 @@ class _EditorScreenState extends State<EditorScreen> {
       allowedExtensions: [
         'mp4', 'm4v', 'mov', 'mkv', 'avi', 'webm',
         'mpeg', 'mpg', 'mts', 'm2ts', 'ts', 'vob', 'wmv',
+        'jpg', 'jpeg', 'png', 'webp',
       ],
     );
     if (chosen.isEmpty || !mounted) return;
@@ -246,12 +403,34 @@ class _EditorScreenState extends State<EditorScreen> {
         VideoPlayerController? probe;
         try {
           await File(source).copy(copy.path);
-          probe = VideoPlayerController.file(copy);
-          await probe.initialize().timeout(const Duration(seconds: 25));
-          final duration = probe.value.duration.inMilliseconds;
-          if (duration < 500) throw StateError('No usable frames');
-          additions.add(EditorClip(
-              _nextId++, copy.path, item.name, duration, 0, duration));
+          final ext = p.extension(item.name).toLowerCase();
+          if (const ['.jpg', '.jpeg', '.png', '.webp'].contains(ext)) {
+            final bytes = await copy.readAsBytes();
+            final codec = await ui.instantiateImageCodec(
+                bytes, targetWidth: 512);
+            try {
+              final frame = await codec.getNextFrame();
+              final width = frame.image.width;
+              final height = frame.image.height;
+              frame.image.dispose();
+              if (width <= 0 || height <= 0) {
+                throw StateError('Invalid photo dimensions');
+              }
+              additions.add(EditorClip(
+                _nextId++, copy.path, item.name, 3600000, 0, 5000,
+                isImage: true, imageWidth: width, imageHeight: height,
+              ));
+            } finally {
+              codec.dispose();
+            }
+          } else {
+            probe = VideoPlayerController.file(copy);
+            await probe.initialize().timeout(const Duration(seconds: 25));
+            final duration = probe.value.duration.inMilliseconds;
+            if (duration < 500) throw StateError('No usable frames');
+            additions.add(EditorClip(
+                _nextId++, copy.path, item.name, duration, 0, duration));
+          }
         } catch (_) {
           skipped.add(item.name);
           if (await copy.exists()) await copy.delete();
@@ -401,7 +580,7 @@ class _EditorScreenState extends State<EditorScreen> {
       _error = null;
     });
     try {
-      await _player?.pause();
+      _pausePreview();
       final root = await _root();
       final work = Directory(p.join(root.path, 'export_work'));
       final exports = Directory(p.join(root.path, 'exports'));
@@ -435,14 +614,18 @@ class _EditorScreenState extends State<EditorScreen> {
         ].join(',');
         final output = p.join(work.path,
             stamp + '_clip_' + i.toString() + '.mp4');
-        final audio = await _hasAudio(clip.path);
+        final audio = clip.isImage ? false : await _hasAudio(clip.path);
         final arguments = <String>[
           '-hide_banner', '-nostdin', '-loglevel', 'error',
+          if (clip.isImage) ...[
+            '-loop', '1', '-framerate', '30',
+          ],
           '-i', clip.path,
           if (!audio) ...[
             '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
           ],
-          '-ss', (clip.start / 1000).toStringAsFixed(3),
+          if (!clip.isImage)
+            ...['-ss', (clip.start / 1000).toStringAsFixed(3)],
           '-t', ((clip.end - clip.start) / 1000).toStringAsFixed(3),
           '-map', '0:v:0', '-map', audio ? '0:a:0' : '1:a:0',
           '-vf', filters,
@@ -507,20 +690,19 @@ class _EditorScreenState extends State<EditorScreen> {
 
   void _onVideoGestureStart(EditorClip clip) {
     _gestureStartZoom = clip.zoom;
-    final player = _player;
-    if (player != null && player.value.isPlaying) {
-      unawaited(player.pause());
-    }
+    if (_isPreviewPlaying) _pausePreview();
   }
 
   void _onVideoGestureUpdate(
       EditorClip clip, ScaleUpdateDetails details, Size frame) {
     if (_busy) return;
     final video = _player;
-    if (video == null || !video.value.isInitialized) return;
-    final rotatedAspect = clip.turns.isOdd
-        ? 1 / video.value.aspectRatio
-        : video.value.aspectRatio;
+    if (!clip.isImage &&
+        (video == null || !video.value.isInitialized)) return;
+    final aspect = clip.isImage
+        ? clip.imageWidth / clip.imageHeight
+        : video!.value.aspectRatio;
+    final rotatedAspect = clip.turns.isOdd ? 1 / aspect : aspect;
     final drawnWidth = frame.width > frame.height * rotatedAspect
         ? frame.width
         : frame.height * rotatedAspect;
@@ -574,16 +756,18 @@ class _EditorScreenState extends State<EditorScreen> {
             builder: (context, constraints) {
               final frame = Size(
                   constraints.maxWidth, constraints.maxHeight);
-              if (clip == null || player == null ||
-                  !player.value.isInitialized) {
+              if (clip == null || (!clip.isImage &&
+                  (player == null || !player.value.isInitialized))) {
                 return Container(
                   color: Colors.black,
                   alignment: Alignment.center,
-                  child: const Text('Import a video to preview it'),
+                  child: const Text('Import photos or videos to preview'),
                 );
               }
-              final video = player;
-              final sourceSize = video.value.size;
+              final sourceSize = clip.isImage
+                  ? Size(clip.imageWidth.toDouble(),
+                      clip.imageHeight.toDouble())
+                  : player!.value.size;
               final turned = clip.turns.isOdd;
               final displayWidth =
                   turned ? sourceSize.height : sourceSize.width;
@@ -622,7 +806,13 @@ class _EditorScreenState extends State<EditorScreen> {
                               height: displayHeight,
                               child: RotatedBox(
                                 quarterTurns: clip.turns,
-                                child: VideoPlayer(video),
+                                child: clip.isImage
+                                    ? Image.file(File(clip.path),
+                                        fit: BoxFit.fill,
+                                        errorBuilder: (context, error, stack) =>
+                                            const Center(child:
+                                                Text('Photo unavailable')))
+                                    : VideoPlayer(player!),
                               ),
                             ),
                           ),
@@ -658,36 +848,135 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  Widget _previewControls(EditorClip? clip, VideoPlayerController? player) {
-    if (clip == null || player == null) {
-      return const SizedBox(height: 54);
-    }
+  Widget _previewControls() {
+    final duration = _timelineLength;
+    final timelineAt = (_scrubMs ?? _timelineAt).clamp(0, duration);
     return SizedBox(
       height: 54,
       child: Row(children: [
         IconButton(
-          tooltip: player.value.isPlaying ? 'Pause' : 'Play',
-          onPressed: _busy ? null : () async {
-            if (player.value.isPlaying) {
-              await player.pause();
-            } else {
-              if (_at >= clip.end - 100) await _seek(clip.start);
-              await player.play();
-            }
-            if (mounted) setState(() {});
-          },
-          icon: Icon(player.value.isPlaying
+          tooltip: _isPreviewPlaying
+              ? 'Pause the project' : 'Play all clips in order',
+          onPressed: _busy || _active == null
+              ? null : () => unawaited(_togglePlayback()),
+          icon: Icon(_isPreviewPlaying
               ? Icons.pause : Icons.play_arrow),
         ),
+        Text(_time(timelineAt),
+            style: const TextStyle(fontSize: 12)),
         Expanded(child: Slider(
-          min: clip.start.toDouble(),
-          max: clip.end.toDouble(),
-          value: _at.clamp(clip.start, clip.end).toDouble(),
-          onChanged: _busy ? null
-              : (v) => unawaited(_seek(v.round())),
+          min: 0,
+          max: duration > 0 ? duration.toDouble() : 1.0,
+          value: timelineAt.toDouble(),
+          onChangeStart: _busy || duration == 0 ? null : (v) {
+            _pausePreview();
+            setState(() => _scrubMs = v.round());
+          },
+          onChanged: _busy || duration == 0 ? null
+              : (v) => setState(() => _scrubMs = v.round()),
+          onChangeEnd: _busy || duration == 0 ? null : (v) async {
+            await _seekTimeline(v.round());
+            if (mounted) setState(() => _scrubMs = null);
+          },
         )),
-        Text(_time(_at)),
+        Text(_time(duration),
+            style: const TextStyle(fontSize: 12)),
         const SizedBox(width: 8),
+      ]),
+    );
+  }
+
+  Widget _clipStrip() {
+    if (_clips.isEmpty) {
+      return const SizedBox(
+        height: 77,
+        child: Center(child: Text('Imported clips appear here on the timeline')),
+      );
+    }
+    final colors = Theme.of(context).colorScheme;
+    return SizedBox(
+      height: 88,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(children: [
+            const Text('Timeline',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text('Tap a clip to jump • Play runs them all',
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 11, color: Colors.white70)),
+            ),
+            Text(_clips.length.toString() + ' clips',
+                style: const TextStyle(fontSize: 11)),
+          ]),
+        ),
+        const SizedBox(height: 5),
+        Expanded(
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            itemCount: _clips.length,
+            itemBuilder: (context, index) {
+              final item = _clips[index];
+              final duration = item.end - item.start;
+              final width =
+                  (duration / 1000 * 12).clamp(100.0, 250.0).toDouble();
+              final selected = item.id == _activeId;
+              final progress = selected && duration > 0
+                  ? ((_at - item.start) / duration).clamp(0.0, 1.0).toDouble()
+                  : 0.0;
+              return GestureDetector(
+                onTapUp: _busy ? null : (details) {
+                  final fraction =
+                      (details.localPosition.dx / width).clamp(0.0, 1.0);
+                  final at = _clipOffset(item) + (fraction * duration).round();
+                  unawaited(_seekTimeline(at));
+                },
+                child: Container(
+                  width: width,
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  padding: const EdgeInsets.fromLTRB(8, 5, 8, 4),
+                  decoration: BoxDecoration(
+                    color: selected
+                        ? colors.primaryContainer
+                        : colors.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(7),
+                    border: Border.all(
+                      color: selected ? colors.primary : colors.outlineVariant,
+                      width: selected ? 2 : 1,
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('${index + 1}. ${item.isImage ? 'Photo: ' : ''}${item.name}',
+                          maxLines: 1, overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600,
+                            color: selected
+                                ? colors.onPrimaryContainer : colors.onSurface,
+                          )),
+                      const Spacer(),
+                      Text(_time(duration),
+                          style: TextStyle(fontSize: 11,
+                              color: selected ? colors.onPrimaryContainer
+                                  : colors.onSurfaceVariant)),
+                      const SizedBox(height: 3),
+                      LinearProgressIndicator(
+                        value: progress,
+                        minHeight: 3,
+                        backgroundColor: colors.surface,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        const SizedBox(height: 4),
       ]),
     );
   }
@@ -697,7 +986,7 @@ class _EditorScreenState extends State<EditorScreen> {
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       children: [
-        const Text('Touch the video above to reframe it.',
+        const Text('Touch the preview above to reframe it.',
             style: TextStyle(fontWeight: FontWeight.w600)),
         const SizedBox(height: 6),
         const Text('Pinch with two fingers to zoom. Drag with one finger '
@@ -730,6 +1019,21 @@ class _EditorScreenState extends State<EditorScreen> {
           )),
           Text((clip?.zoom ?? 1).toStringAsFixed(1) + '×'),
         ]),
+        if (clip != null && clip.isImage)
+          Row(children: [
+            const Text('Photo duration'),
+            Expanded(child: Slider(
+              min: 1, max: 30,
+              value: ((clip.end - clip.start) / 1000)
+                  .clamp(1.0, 30.0).toDouble(),
+              onChanged: editable ? (value) => setState(() {
+                clip.end = clip.start + (value * 1000).round();
+              }) : null,
+              onChangeEnd: editable
+                  ? (_) => unawaited(_save()) : null,
+            )),
+            Text(((clip.end - clip.start) / 1000).round().toString() + 's'),
+          ]),
         Row(children: [
           const Text('Crop / output'),
           const SizedBox(width: 12),
@@ -754,14 +1058,16 @@ class _EditorScreenState extends State<EditorScreen> {
               '   Length ' + _time(clip.end - clip.start)),
         const SizedBox(height: 8),
         Wrap(spacing: 6, runSpacing: 4, children: [
-          OutlinedButton(
-            onPressed: editable ? _setIn : null,
-            child: const Text('Set start'),
-          ),
-          OutlinedButton(
-            onPressed: editable ? _setOut : null,
-            child: const Text('Set end'),
-          ),
+          if (clip?.isImage != true)
+            OutlinedButton(
+              onPressed: editable ? _setIn : null,
+              child: const Text('Set start'),
+            ),
+          if (clip?.isImage != true)
+            OutlinedButton(
+              onPressed: editable ? _setOut : null,
+              child: const Text('Set end'),
+            ),
           OutlinedButton(
             onPressed: editable ? _split : null,
             child: const Text('Split here'),
@@ -863,7 +1169,8 @@ class _EditorScreenState extends State<EditorScreen> {
       body: SafeArea(
         child: Column(children: [
           _videoFrame(clip, player),
-          _previewControls(clip, player),
+          _previewControls(),
+          _clipStrip(),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Row(children: [
@@ -874,7 +1181,7 @@ class _EditorScreenState extends State<EditorScreen> {
               ),
               const SizedBox(width: 8),
               ChoiceChip(
-                label: const Text('Clip order'),
+                label: const Text('Reorder clips'),
                 selected: _panel == 1,
                 onSelected: (_) => setState(() => _panel = 1),
               ),
