@@ -296,7 +296,9 @@ class _EditorScreenState extends State<EditorScreen> {
   void _split() {
     final clip = _active;
     if (clip == null || _busy ||
-        _at <= clip.start + 300 || _at >= clip.end - 300) return;
+        _at <= clip.start + 300 || _at >= clip.end - 300) {
+      return;
+    }
     setState(() {
       final second = clip.duplicate(_nextId++);
       second.start = _at;
