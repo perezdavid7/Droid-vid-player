@@ -1,3 +1,4 @@
+// ignore_for_file: prefer_interpolation_to_compose_strings
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -212,15 +213,14 @@ class _EditorScreenState extends State<EditorScreen> {
 
   Future<void> _import() async {
     if (_busy) return;
-    final chosen = await FilePicker.platform.pickFiles(
-      allowMultiple: true,
+    final chosen = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: [
         'mp4', 'm4v', 'mov', 'mkv', 'avi', 'webm',
         'mpeg', 'mpg', 'mts', 'm2ts', 'ts', 'vob', 'wmv',
       ],
     );
-    if (chosen == null || chosen.files.isEmpty || !mounted) return;
+    if (chosen.isEmpty || !mounted) return;
     setState(() {
       _busy = true;
       _error = null;
@@ -232,7 +232,7 @@ class _EditorScreenState extends State<EditorScreen> {
       final root = await _root();
       final dir = Directory(p.join(root.path, 'media'));
       await dir.create(recursive: true);
-      for (final item in chosen.files) {
+      for (final item in chosen) {
         final source = item.path;
         if (source == null || !await File(source).exists()) {
           skipped.add(item.name);
@@ -289,7 +289,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   void _setOut() {
     final clip = _active;
-    if (clip == null || _at <= clip.start + 300) return;
+    if (clip == null || _at <= clip.start + 300) { return; }
     _change((c) => c.end = _at);
   }
 
