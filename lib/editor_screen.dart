@@ -811,6 +811,7 @@ class _EditorScreenState extends State<EditorScreen> {
                                 child: clip.isImage
                                     ? Image.file(File(clip.path),
                                         fit: BoxFit.fill,
+                                        cacheWidth: 1080,
                                         errorBuilder: (context, error, stack) =>
                                             const Center(child:
                                                 Text('Photo unavailable')))
@@ -859,7 +860,8 @@ class _EditorScreenState extends State<EditorScreen> {
         IconButton(
           tooltip: _isPreviewPlaying
               ? 'Pause the project' : 'Play all clips in order',
-          onPressed: _busy || _active == null
+          onPressed: _busy || _active == null ||
+                  (_active?.isImage != true && _player == null)
               ? null : () => unawaited(_togglePlayback()),
           icon: Icon(_isPreviewPlaying
               ? Icons.pause : Icons.play_arrow),
