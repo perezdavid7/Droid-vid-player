@@ -70,6 +70,8 @@ class _EditorScreenState extends State<EditorScreen> {
   String _ratio = '16:9';
   String _message = 'Import local videos to start. Originals stay untouched.';
   String? _error;
+  int _panel = 0;
+  double _gestureStartZoom = 1;
 
   EditorClip? get _active {
     for (final c in _clips) {
@@ -309,19 +311,6 @@ class _EditorScreenState extends State<EditorScreen> {
     unawaited(_save());
   }
 
-  void _move(int direction) {
-    final clip = _active;
-    if (clip == null || _busy) return;
-    final from = _clips.indexOf(clip);
-    final to = from + direction;
-    if (to < 0 || to >= _clips.length) return;
-    setState(() {
-      _clips.removeAt(from);
-      _clips.insert(to, clip);
-    });
-    unawaited(_save());
-  }
-
   void _remove() {
     final clip = _active;
     if (clip == null || _busy) return;
@@ -515,15 +504,351 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
-  Widget _button(String label, VoidCallback? onPressed) =>
-      OutlinedButton(onPressed: onPressed, child: Text(label));
+
+  void _onVideoGestureStart(EditorClip clip) {
+    _gestureStartZoom = clip.zoom;
+    final player = _player;
+    if (player != null && player.value.isPlaying) {
+      unawaited(player.pause());
+    }
+  }
+
+  void _onVideoGestureUpdate(
+      EditorClip clip, ScaleUpdateDetails details, Size frame) {
+    if (_busy) return;
+    final video = _player;
+    if (video == null || !video.value.isInitialized) return;
+    final rotatedAspect = clip.turns.isOdd
+        ? 1 / video.value.aspectRatio
+        : video.value.aspectRatio;
+    final drawnWidth = frame.width > frame.height * rotatedAspect
+        ? frame.width
+        : frame.height * rotatedAspect;
+    final drawnHeight = frame.height > frame.width / rotatedAspect
+        ? frame.height
+        : frame.width / rotatedAspect;
+    final nextZoom =
+        (_gestureStartZoom * details.scale).clamp(1.0, 3.0).toDouble();
+    var nextX = clip.x;
+    var nextY = clip.y;
+    if (nextZoom > 1.01) {
+      nextX = (nextX -
+          details.focalPointDelta.dx / (drawnWidth * (nextZoom - 1)))
+          .clamp(0.0, 1.0).toDouble();
+      nextY = (nextY -
+          details.focalPointDelta.dy / (drawnHeight * (nextZoom - 1)))
+          .clamp(0.0, 1.0).toDouble();
+    } else {
+      nextX = 0.5;
+      nextY = 0.5;
+    }
+    setState(() {
+      clip.zoom = nextZoom;
+      clip.x = nextX;
+      clip.y = nextY;
+    });
+  }
+
+  void _resetFrame() {
+    _change((c) {
+      c.zoom = 1;
+      c.x = 0.5;
+      c.y = 0.5;
+    });
+  }
+
+  Widget _videoFrame(EditorClip? clip, VideoPlayerController? player) {
+    final ratio = switch (_ratio) {
+      '9:16' => 9 / 16,
+      '1:1' => 1.0,
+      _ => 16 / 9,
+    };
+    final viewportHeight =
+        (MediaQuery.sizeOf(context).height * 0.38).clamp(220.0, 355.0).toDouble();
+    return SizedBox(
+      height: viewportHeight,
+      child: Center(
+        child: AspectRatio(
+          aspectRatio: ratio,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final frame = Size(
+                  constraints.maxWidth, constraints.maxHeight);
+              if (clip == null || player == null ||
+                  !player.value.isInitialized) {
+                return Container(
+                  color: Colors.black,
+                  alignment: Alignment.center,
+                  child: const Text('Import a video to preview it'),
+                );
+              }
+              final video = player;
+              final sourceSize = video.value.size;
+              final turned = clip.turns.isOdd;
+              final displayWidth =
+                  turned ? sourceSize.height : sourceSize.width;
+              final displayHeight =
+                  turned ? sourceSize.width : sourceSize.height;
+              final drawnWidth =
+                  frame.width > frame.height * displayWidth / displayHeight
+                      ? frame.width
+                      : frame.height * displayWidth / displayHeight;
+              final drawnHeight =
+                  frame.height > frame.width * displayHeight / displayWidth
+                      ? frame.height
+                      : frame.width * displayHeight / displayWidth;
+              return GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onScaleStart: _busy ? null
+                    : (_) => _onVideoGestureStart(clip),
+                onScaleUpdate: _busy ? null
+                    : (details) => _onVideoGestureUpdate(clip, details, frame),
+                onScaleEnd: _busy ? null
+                    : (_) => unawaited(_save()),
+                child: ClipRect(
+                  child: Stack(children: [
+                    Positioned.fill(
+                      child: Transform.translate(
+                        offset: Offset(
+                          (0.5 - clip.x) * drawnWidth * (clip.zoom - 1),
+                          (0.5 - clip.y) * drawnHeight * (clip.zoom - 1),
+                        ),
+                        child: Transform.scale(
+                          scale: clip.zoom,
+                          child: FittedBox(
+                            fit: BoxFit.cover,
+                            child: SizedBox(
+                              width: displayWidth,
+                              height: displayHeight,
+                              child: RotatedBox(
+                                quarterTurns: clip.turns,
+                                child: VideoPlayer(video),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (!_busy)
+                      const Positioned(
+                        left: 8,
+                        bottom: 8,
+                        child: IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              color: Color(0xA0000000),
+                              borderRadius: BorderRadius.all(
+                                  Radius.circular(6)),
+                            ),
+                            child: Padding(
+                              padding: EdgeInsets.all(6),
+                              child: Text('Pinch to zoom • Drag to move',
+                                  style: TextStyle(fontSize: 11)),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ]),
+                ),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _previewControls(EditorClip? clip, VideoPlayerController? player) {
+    if (clip == null || player == null) {
+      return const SizedBox(height: 54);
+    }
+    return SizedBox(
+      height: 54,
+      child: Row(children: [
+        IconButton(
+          tooltip: player.value.isPlaying ? 'Pause' : 'Play',
+          onPressed: _busy ? null : () async {
+            if (player.value.isPlaying) {
+              await player.pause();
+            } else {
+              if (_at >= clip.end - 100) await _seek(clip.start);
+              await player.play();
+            }
+            if (mounted) setState(() {});
+          },
+          icon: Icon(player.value.isPlaying
+              ? Icons.pause : Icons.play_arrow),
+        ),
+        Expanded(child: Slider(
+          min: clip.start.toDouble(),
+          max: clip.end.toDouble(),
+          value: _at.clamp(clip.start, clip.end).toDouble(),
+          onChanged: _busy ? null
+              : (v) => unawaited(_seek(v.round())),
+        )),
+        Text(_time(_at)),
+        const SizedBox(width: 8),
+      ]),
+    );
+  }
+
+  Widget _adjustPanel(EditorClip? clip) {
+    final editable = clip != null && !_busy;
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      children: [
+        const Text('Touch the video above to reframe it.',
+            style: TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 6),
+        const Text('Pinch with two fingers to zoom. Drag with one finger '
+            'to reposition the enlarged picture. The final MP4 uses '
+            'these framing settings.',
+            style: TextStyle(color: Colors.white70)),
+        const SizedBox(height: 10),
+        Wrap(spacing: 6, runSpacing: 4, children: [
+          OutlinedButton.icon(
+            onPressed: editable ? _resetFrame : null,
+            icon: const Icon(Icons.center_focus_strong),
+            label: const Text('Reset picture'),
+          ),
+          OutlinedButton.icon(
+            onPressed: editable
+                ? () => _change((c) => c.turns = (c.turns + 1) % 4)
+                : null,
+            icon: const Icon(Icons.rotate_right),
+            label: const Text('Rotate 90°'),
+          ),
+        ]),
+        Row(children: [
+          const Text('Zoom'),
+          Expanded(child: Slider(
+            min: 1, max: 3,
+            value: (clip?.zoom ?? 1).clamp(1.0, 3.0).toDouble(),
+            onChanged: editable ? (value) =>
+                setState(() => clip!.zoom = value) : null,
+            onChangeEnd: editable ? (_) => unawaited(_save()) : null,
+          )),
+          Text((clip?.zoom ?? 1).toStringAsFixed(1) + '×'),
+        ]),
+        Row(children: [
+          const Text('Crop / output'),
+          const SizedBox(width: 12),
+          DropdownButton<String>(
+            value: _ratio,
+            items: const [
+              DropdownMenuItem(value: '16:9', child: Text('16:9')),
+              DropdownMenuItem(value: '9:16', child: Text('9:16')),
+              DropdownMenuItem(value: '1:1', child: Text('1:1')),
+            ],
+            onChanged: _busy ? null : (value) {
+              if (value == null) return;
+              setState(() => _ratio = value);
+              unawaited(_save());
+            },
+          ),
+        ]),
+        const Divider(),
+        Text(clip == null ? 'Import a clip to begin trimming.'
+            : 'In ' + _time(clip.start) +
+              '   Out ' + _time(clip.end) +
+              '   Length ' + _time(clip.end - clip.start)),
+        const SizedBox(height: 8),
+        Wrap(spacing: 6, runSpacing: 4, children: [
+          OutlinedButton(
+            onPressed: editable ? _setIn : null,
+            child: const Text('Set start'),
+          ),
+          OutlinedButton(
+            onPressed: editable ? _setOut : null,
+            child: const Text('Set end'),
+          ),
+          OutlinedButton(
+            onPressed: editable ? _split : null,
+            child: const Text('Split here'),
+          ),
+          OutlinedButton(
+            onPressed: editable ? _remove : null,
+            child: const Text('Remove clip'),
+          ),
+        ]),
+      ],
+    );
+  }
+
+  Widget _timelinePanel(EditorClip? clip) {
+    final totalMs = _clips.fold<int>(0, (sum, c) => sum + c.end - c.start);
+    return Column(children: [
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(children: [
+          const Expanded(
+            child: Text('Clips play from top to bottom',
+                style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+          Text(_clips.length.toString() + ' clips • ' + _time(totalMs)),
+        ]),
+      ),
+      Expanded(
+        child: _clips.isEmpty
+            ? const Center(child: Text('Import clips to build a timeline'))
+            : ListView.builder(
+                itemCount: _clips.length,
+                itemBuilder: (context, index) {
+                  final item = _clips[index];
+                  final selected = item.id == clip?.id;
+                  return Card(
+                    color: selected
+                        ? Theme.of(context).colorScheme.primaryContainer
+                        : null,
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        child: Text((index + 1).toString()),
+                      ),
+                      title: Text(item.name,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(_time(item.end - item.start) +
+                          ' • Tap to edit picture'),
+                      onTap: _busy ? null : () {
+                        setState(() => _panel = 0);
+                        unawaited(_open(item));
+                      },
+                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                        IconButton(
+                          tooltip: 'Move this clip earlier in the finished video',
+                          onPressed: _busy || index == 0 ? null : () {
+                            setState(() {
+                              _clips.removeAt(index);
+                              _clips.insert(index - 1, item);
+                            });
+                            unawaited(_save());
+                          },
+                          icon: const Icon(Icons.arrow_upward),
+                        ),
+                        IconButton(
+                          tooltip: 'Move this clip later in the finished video',
+                          onPressed: _busy || index == _clips.length - 1
+                              ? null : () {
+                            setState(() {
+                              _clips.removeAt(index);
+                              _clips.insert(index + 1, item);
+                            });
+                            unawaited(_save());
+                          },
+                          icon: const Icon(Icons.arrow_downward),
+                        ),
+                      ]),
+                    ),
+                  );
+                },
+              ),
+      ),
+    ]);
+  }
 
   @override
   Widget build(BuildContext context) {
     final clip = _active;
     final player = _player;
-    final editable = clip != null && !_busy;
-    final totalMs = _clips.fold<int>(0, (sum, c) => sum + c.end - c.start);
     return Scaffold(
       appBar: AppBar(
         title: const Text('Droid Vid Editor'),
@@ -537,197 +862,38 @@ class _EditorScreenState extends State<EditorScreen> {
       ),
       body: SafeArea(
         child: Column(children: [
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(12),
+          _videoFrame(clip, player),
+          _previewControls(clip, player),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(children: [
+              ChoiceChip(
+                label: const Text('Adjust picture'),
+                selected: _panel == 0,
+                onSelected: (_) => setState(() => _panel = 0),
+              ),
+              const SizedBox(width: 8),
+              ChoiceChip(
+                label: const Text('Clip order'),
+                selected: _panel == 1,
+                onSelected: (_) => setState(() => _panel = 1),
+              ),
+            ]),
+          ),
+          Expanded(child: _panel == 0
+              ? _adjustPanel(clip)
+              : _timelinePanel(clip)),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Container(
-                  height: 245,
-                  clipBehavior: Clip.hardEdge,
-                  decoration: BoxDecoration(
-                    color: Colors.black,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: player != null && player.value.isInitialized
-                      ? Center(
-                          child: Transform.translate(
-                            offset: Offset(
-                              (0.5 - (clip?.x ?? 0.5)) *
-                                  120 * ((clip?.zoom ?? 1) - 1),
-                              (0.5 - (clip?.y ?? 0.5)) *
-                                  120 * ((clip?.zoom ?? 1) - 1),
-                            ),
-                            child: Transform.scale(
-                              scale: clip?.zoom ?? 1,
-                              child: RotatedBox(
-                                quarterTurns: clip?.turns ?? 0,
-                                child: AspectRatio(
-                                  aspectRatio: player.value.aspectRatio,
-                                  child: VideoPlayer(player),
-                                ),
-                              ),
-                            ),
-                          ),
-                        )
-                      : const Center(
-                          child: Text('Import a video to preview it')),
-                ),
-                if (clip != null && player != null) ...[
-                  Row(children: [
-                    IconButton(
-                      tooltip: player.value.isPlaying ? 'Pause' : 'Play',
-                      onPressed: _busy ? null : () async {
-                        if (player.value.isPlaying) {
-                          await player.pause();
-                        } else {
-                          if (_at >= clip.end - 100) await _seek(clip.start);
-                          await player.play();
-                        }
-                        if (mounted) setState(() {});
-                      },
-                      icon: Icon(player.value.isPlaying
-                          ? Icons.pause : Icons.play_arrow),
-                    ),
-                    Expanded(
-                      child: Slider(
-                        min: clip.start.toDouble(),
-                        max: clip.end.toDouble(),
-                        value: _at.clamp(clip.start, clip.end).toDouble(),
-                        onChanged: _busy
-                            ? null : (v) => unawaited(_seek(v.round())),
-                      ),
-                    ),
-                    Text(_time(_at)),
-                  ]),
-                  Text('In ' + _time(clip.start) +
-                      ' · Out ' + _time(clip.end) +
-                      ' · Length ' + _time(clip.end - clip.start)),
-                  const SizedBox(height: 6),
-                  Wrap(spacing: 5, runSpacing: 4, children: [
-                    _button('Set in', editable ? _setIn : null),
-                    _button('Set out', editable ? _setOut : null),
-                    _button('Split', editable ? _split : null),
-                    _button('Rotate 90°', editable
-                        ? () => _change((c) => c.turns = (c.turns + 1) % 4)
-                        : null),
-                    _button('Move left', editable ? () => _move(-1) : null),
-                    _button('Move right', editable ? () => _move(1) : null),
-                    _button('Remove', editable ? _remove : null),
-                  ]),
-                  const SizedBox(height: 10),
-                  const Text('Static reframe',
-                      style: TextStyle(fontWeight: FontWeight.bold)),
-                  Row(children: [
-                    const SizedBox(width: 56, child: Text('Zoom')),
-                    Expanded(child: Slider(
-                      min: 1, max: 3,
-                      value: clip.zoom.clamp(1.0, 3.0).toDouble(),
-                      onChanged: editable
-                          ? (v) => setState(() => clip.zoom = v) : null,
-                      onChangeEnd: editable
-                          ? (_) => unawaited(_save()) : null,
-                    )),
-                    Text(clip.zoom.toStringAsFixed(1)),
-                  ]),
-                  Row(children: [
-                    const SizedBox(width: 56, child: Text('Pan X')),
-                    Expanded(child: Slider(
-                      min: 0, max: 1,
-                      value: clip.x.clamp(0.0, 1.0).toDouble(),
-                      onChanged: editable
-                          ? (v) => setState(() => clip.x = v) : null,
-                      onChangeEnd: editable
-                          ? (_) => unawaited(_save()) : null,
-                    )),
-                  ]),
-                  Row(children: [
-                    const SizedBox(width: 56, child: Text('Pan Y')),
-                    Expanded(child: Slider(
-                      min: 0, max: 1,
-                      value: clip.y.clamp(0.0, 1.0).toDouble(),
-                      onChanged: editable
-                          ? (v) => setState(() => clip.y = v) : null,
-                      onChangeEnd: editable
-                          ? (_) => unawaited(_save()) : null,
-                    )),
-                  ]),
-                ],
-                const SizedBox(height: 10),
-                Row(children: [
-                  const Text('Crop/output: '),
-                  DropdownButton<String>(
-                    value: _ratio,
-                    items: const [
-                      DropdownMenuItem(value: '16:9', child: Text('16:9')),
-                      DropdownMenuItem(value: '9:16', child: Text('9:16')),
-                      DropdownMenuItem(value: '1:1', child: Text('1:1')),
-                    ],
-                    onChanged: _busy ? null : (choice) {
-                      if (choice == null) return;
-                      setState(() => _ratio = choice);
-                      unawaited(_save());
-                    },
-                  ),
-                  const Spacer(),
-                  Text(_clips.length.toString() + ' clips · ' + _time(totalMs)),
-                ]),
-                const Text('Timeline — tap clips to edit'),
-                const SizedBox(height: 5),
-                SizedBox(
-                  height: 102,
-                  child: _clips.isEmpty
-                      ? const Center(child: Text('No clips imported'))
-                      : ListView.builder(
-                          scrollDirection: Axis.horizontal,
-                          itemCount: _clips.length,
-                          itemBuilder: (context, index) {
-                            final item = _clips[index];
-                            final selected = item.id == _activeId;
-                            return SizedBox(
-                              width: 168,
-                              child: Card(
-                                color: selected
-                                    ? Theme.of(context).colorScheme.primaryContainer
-                                    : null,
-                                child: InkWell(
-                                  onTap: _busy ? null
-                                      : () => unawaited(_open(item)),
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(8),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text((index + 1).toString() +
-                                            '. ' + item.name,
-                                            maxLines: 2,
-                                            overflow: TextOverflow.ellipsis),
-                                        const Spacer(),
-                                        Text(_time(item.end - item.start)),
-                                        const LinearProgressIndicator(value: 1),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                ),
-                const SizedBox(height: 10),
-                Text(_message),
+                Text(_message, maxLines: 2,
+                    overflow: TextOverflow.ellipsis),
                 if (_error != null)
                   Text(_error!,
+                      maxLines: 2, overflow: TextOverflow.ellipsis,
                       style: const TextStyle(color: Colors.orangeAccent)),
-                const SizedBox(height: 12),
-                const Text('Planned next: animated keyframes, tracked masks, '
-                    'face and body beauty controls, makeup, and AI removal '
-                    'of blemishes, tattoos, and unwanted objects.',
-                    style: TextStyle(color: Colors.white60)),
-                const SizedBox(height: 10),
-                const Text('Privacy: files stay on this device. Imported '
-                    'media is copied into private project storage; '
-                    'originals are never modified.',
-                    style: TextStyle(color: Colors.white60)),
               ],
             ),
           ),
