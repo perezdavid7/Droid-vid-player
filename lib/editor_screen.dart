@@ -725,7 +725,7 @@ class _EditorScreenState extends State<EditorScreen> {
             min: 1, max: 3,
             value: (clip?.zoom ?? 1).clamp(1.0, 3.0).toDouble(),
             onChanged: editable ? (value) =>
-                setState(() => clip!.zoom = value) : null,
+                setState(() => clip.zoom = value) : null,
             onChangeEnd: editable ? (_) => unawaited(_save()) : null,
           )),
           Text((clip?.zoom ?? 1).toStringAsFixed(1) + '×'),
