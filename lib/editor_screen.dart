@@ -1182,8 +1182,10 @@ class _EditorScreenState extends State<EditorScreen> {
           final seconds = _transitionSeconds < shortest / 3
               ? _transitionSeconds : shortest / 3;
           if (seconds >= 0.20) {
-            if (mounted) setState(() =>
-                _message = 'Rendering ' + _transition + ' transitions…');
+            if (mounted) {
+              setState(() =>
+                  _message = 'Rendering ' + _transition + ' transitions…');
+            }
             joined = await _joinWithTransitions(
                 parts, partDurations, partial.path, seconds);
             if (!joined) {
