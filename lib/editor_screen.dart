@@ -22,7 +22,7 @@ class EditorClip {
       this.saturation = 1, this.clarity = 0, this.overlayPath,
       this.overlayWidth = 0, this.overlayHeight = 0,
       this.overlaySize = 0.35, this.overlayX = 0.5, this.overlayY = 0.5,
-      this.overlayOpacity = 1});
+      this.overlayOpacity = 1, this.reverse = false});
   final int id;
   final String path;
   final String name;
@@ -48,6 +48,7 @@ class EditorClip {
   double overlayX;
   double overlayY;
   double overlayOpacity;
+  bool reverse;
 
   EditorClip duplicate(int newId) =>
       EditorClip(newId, path, name, length, start, end,
@@ -58,7 +59,7 @@ class EditorClip {
           overlayPath: overlayPath, overlayWidth: overlayWidth,
           overlayHeight: overlayHeight, overlaySize: overlaySize,
           overlayX: overlayX, overlayY: overlayY,
-          overlayOpacity: overlayOpacity);
+          overlayOpacity: overlayOpacity, reverse: reverse);
 
   Map<String, Object?> toJson() => {
     'id': id, 'path': path, 'name': name, 'length': length,
@@ -70,7 +71,7 @@ class EditorClip {
     'overlayPath': overlayPath, 'overlayWidth': overlayWidth,
     'overlayHeight': overlayHeight, 'overlaySize': overlaySize,
     'overlayX': overlayX, 'overlayY': overlayY,
-    'overlayOpacity': overlayOpacity,
+    'overlayOpacity': overlayOpacity, 'reverse': reverse,
   };
 
   factory EditorClip.fromJson(Map<String, dynamic> data) => EditorClip(
@@ -99,7 +100,26 @@ class EditorClip {
     overlayX: (data['overlayX'] as num?)?.toDouble() ?? 0.5,
     overlayY: (data['overlayY'] as num?)?.toDouble() ?? 0.5,
     overlayOpacity: (data['overlayOpacity'] as num?)?.toDouble() ?? 1,
+    reverse: data['reverse'] == true,
   );
+}
+
+class EditorProject {
+  EditorProject(this.id, this.name, this.updatedAt);
+  final String id;
+  String name;
+  int updatedAt;
+
+  Map<String, Object> toJson() => {
+    'id': id, 'name': name, 'updatedAt': updatedAt,
+  };
+
+  factory EditorProject.fromJson(Map<String, dynamic> data) =>
+      EditorProject(
+        data['id'] as String,
+        data['name'] as String,
+        (data['updatedAt'] as num?)?.toInt() ?? 0,
+      );
 }
 
 class EditorScreen extends StatefulWidget {
@@ -110,6 +130,11 @@ class EditorScreen extends StatefulWidget {
 
 class _EditorScreenState extends State<EditorScreen> {
   final _clips = <EditorClip>[];
+  final _projects = <EditorProject>[];
+  String? _projectId;
+  Future<void> _saveTail = Future<void>.value();
+  String _transition = 'None';
+  double _transitionSeconds = 0.5;
   VideoPlayerController? _player;
   Timer? _photoTimer;
   int? _activeId;
@@ -134,6 +159,13 @@ class _EditorScreenState extends State<EditorScreen> {
       if (c.id == _activeId) return c;
     }
     return null;
+  }
+
+  String get _projectName {
+    for (final project in _projects) {
+      if (project.id == _projectId) return project.name;
+    }
+    return 'Droid Vid Editor';
   }
 
   int _clipDuration(EditorClip clip) => clip.isImage
@@ -174,55 +206,296 @@ class _EditorScreenState extends State<EditorScreen> {
     return root;
   }
 
-  Future<File> _draft() async =>
-      File(p.join((await _root()).path, 'current_project.json'));
+  Future<File> _projectIndex() async =>
+      File(p.join((await _root()).path, 'project_index.json'));
 
-  Future<void> _save() async {
-    try {
-      final file = await _draft();
-      final temp = File(file.path + '.partial');
-      await temp.writeAsString(jsonEncode({
-        'version': 1,
-        'ratio': _ratio,
-        'clips': _clips.map((c) => c.toJson()).toList(),
-      }), flush: true);
-      await temp.rename(file.path);
-    } catch (error) {
-      if (mounted) setState(() => _error = 'Save failed: $error');
+  Future<File> _projectFile(String id) async {
+    final folder = Directory(p.join((await _root()).path, 'projects'));
+    await folder.create(recursive: true);
+    return File(p.join(folder.path, id + '.json'));
+  }
+
+  Future<void> _writeProjectIndex() async {
+    final file = await _projectIndex();
+    final temp = File(file.path + '.partial');
+    await temp.writeAsString(jsonEncode({
+      'version': 1,
+      'activeId': _projectId,
+      'projects': _projects.map((project) => project.toJson()).toList(),
+    }), flush: true);
+    await temp.rename(file.path);
+  }
+
+  Future<void> _save() {
+    final id = _projectId;
+    if (id == null) return Future<void>.value();
+    final snapshot = jsonEncode({
+      'version': 2,
+      'ratio': _ratio,
+      'transition': _transition,
+      'transitionSeconds': _transitionSeconds,
+      'clips': _clips.map((clip) => clip.toJson()).toList(),
+    });
+    for (final project in _projects) {
+      if (project.id == id) {
+        project.updatedAt = DateTime.now().millisecondsSinceEpoch;
+      }
     }
+    _saveTail = _saveTail.catchError((Object _) {}).then((_) async {
+      final file = await _projectFile(id);
+      final temp = File(file.path + '.partial');
+      await temp.writeAsString(snapshot, flush: true);
+      await temp.rename(file.path);
+      await _writeProjectIndex();
+    });
+    return _saveTail.catchError((Object error) {
+      if (mounted) setState(() => _error = 'Save failed: $error');
+    });
+  }
+
+  Future<void> _clearPreviewAndClips() async {
+    _generation++;
+    _pausePreview();
+    _photoTimer?.cancel();
+    _photoTimer = null;
+    final old = _player;
+    _player = null;
+    old?.removeListener(_watch);
+    if (old != null) await old.dispose();
+    if (!mounted) return;
+    setState(() {
+      _clips.clear();
+      _activeId = null;
+      _nextId = 1;
+      _at = 0;
+      _scrubMs = null;
+      _ratio = '16:9';
+      _transition = 'None';
+      _transitionSeconds = 0.5;
+      _section = 'Edit';
+      _error = null;
+    });
+  }
+
+  Future<void> _loadProject(String id) async {
+    await _clearPreviewAndClips();
+    if (!mounted) return;
+    final file = await _projectFile(id);
+    final restored = <EditorClip>[];
+    String ratio = '16:9';
+    String transition = 'None';
+    double seconds = 0.5;
+    if (await file.exists()) {
+      final data = jsonDecode(await file.readAsString());
+      if (data is Map && data['clips'] is List) {
+        for (final raw in data['clips'] as List) {
+          try {
+            final clip = EditorClip.fromJson(
+                Map<String, dynamic>.from(raw as Map));
+            if (clip.start >= 0 && clip.end > clip.start &&
+                clip.end <= clip.length && clip.speed > 0 &&
+                await File(clip.path).exists()) {
+              restored.add(clip);
+            }
+          } catch (_) {}
+        }
+        if (const ['16:9', '9:16', '1:1'].contains(data['ratio'])) {
+          ratio = data['ratio'] as String;
+        }
+        if (const ['None', 'Fade', 'Wipe'].contains(data['transition'])) {
+          transition = data['transition'] as String;
+        }
+        seconds = ((data['transitionSeconds'] as num?)?.toDouble() ?? 0.5)
+            .clamp(0.25, 1.0).toDouble();
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _projectId = id;
+      _clips.addAll(restored);
+      _ratio = ratio;
+      _transition = transition;
+      _transitionSeconds = seconds;
+      for (final clip in _clips) {
+        if (clip.id >= _nextId) _nextId = clip.id + 1;
+      }
+      _message = 'Opened ' + _projectName + ' • ' +
+          restored.length.toString() + ' clips.';
+    });
+    await _writeProjectIndex();
+    if (_clips.isNotEmpty) await _open(_clips.first);
   }
 
   Future<void> _load() async {
     try {
-      final file = await _draft();
-      if (!await file.exists()) return;
-      final data = jsonDecode(await file.readAsString());
-      if (data is! Map || data['clips'] is! List) return;
-      final restored = <EditorClip>[];
-      for (final raw in data['clips'] as List) {
-        try {
-          final clip = EditorClip.fromJson(Map<String, dynamic>.from(raw as Map));
-          if (clip.start >= 0 && clip.end > clip.start &&
-              clip.end <= clip.length && await File(clip.path).exists()) {
-            restored.add(clip);
+      final index = await _projectIndex();
+      if (await index.exists()) {
+        final raw = jsonDecode(await index.readAsString());
+        if (raw is Map && raw['projects'] is List) {
+          for (final entry in raw['projects'] as List) {
+            try {
+              final project = EditorProject.fromJson(
+                  Map<String, dynamic>.from(entry as Map));
+              if (project.id.startsWith('project_')) {
+                _projects.add(project);
+              }
+            } catch (_) {}
           }
-        } catch (_) {}
+          if (_projects.isNotEmpty) {
+            final active = raw['activeId'] as String?;
+            final id = _projects.any((p) => p.id == active)
+                ? active! : _projects.first.id;
+            await _loadProject(id);
+            return;
+          }
+        }
       }
-      if (!mounted) return;
-      setState(() {
-        _clips.addAll(restored);
-        if (const ['16:9', '9:16', '1:1'].contains(data['ratio'])) {
-          _ratio = data['ratio'] as String;
-        }
-        for (final c in _clips) {
-          if (c.id >= _nextId) _nextId = c.id + 1;
-        }
-        _message = 'Restored ' + restored.length.toString() + ' saved clips.';
-      });
-      if (_clips.isNotEmpty) await _open(_clips.first);
+      final id = 'project_' + DateTime.now().microsecondsSinceEpoch.toString();
+      _projects.add(EditorProject(id, 'My first edit',
+          DateTime.now().millisecondsSinceEpoch));
+      _projectId = id;
+      final legacy = File(p.join((await _root()).path,
+          'current_project.json'));
+      if (await legacy.exists()) {
+        final migrated = await _projectFile(id);
+        await legacy.copy(migrated.path);
+      }
+      await _loadProject(id);
     } catch (error) {
       if (mounted) setState(() => _error = 'Load failed: $error');
     }
+  }
+
+  Future<String?> _askProjectName(String title, String initial) async {
+    final controller = TextEditingController(text: initial);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 60,
+          decoration: const InputDecoration(labelText: 'Project name'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    return name == null || name.isEmpty ? null : name;
+  }
+
+  Future<void> _newProject() async {
+    if (_busy) return;
+    final name = await _askProjectName('New project', 'Untitled edit');
+    if (name == null || !mounted) return;
+    await _save();
+    final id = 'project_' + DateTime.now().microsecondsSinceEpoch.toString();
+    _projects.add(EditorProject(id, name,
+        DateTime.now().millisecondsSinceEpoch));
+    await _clearPreviewAndClips();
+    if (!mounted) return;
+    setState(() {
+      _projectId = id;
+      _message = 'New project: ' + name;
+    });
+    await _save();
+  }
+
+  Future<void> _switchProject(String id) async {
+    if (_busy || id == _projectId) return;
+    await _save();
+    await _loadProject(id);
+  }
+
+  Future<void> _renameProject() async {
+    if (_busy || _projectId == null) return;
+    final name = await _askProjectName('Rename project', _projectName);
+    if (name == null || !mounted) return;
+    for (final project in _projects) {
+      if (project.id == _projectId) project.name = name;
+    }
+    setState(() {});
+    await _writeProjectIndex();
+  }
+
+  Future<void> _showProjects() async {
+    if (_busy) return;
+    await _save();
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: SizedBox(
+          height: (MediaQuery.sizeOf(ctx).height * 0.65)
+              .clamp(300.0, 620.0).toDouble(),
+          child: Column(children: [
+            ListTile(
+              title: const Text('Saved projects',
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              subtitle: const Text('Open a different edit or start a new one'),
+              trailing: IconButton(
+                tooltip: 'New project',
+                icon: const Icon(Icons.add_circle_outline),
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  unawaited(_newProject());
+                },
+              ),
+            ),
+            Expanded(child: ListView(
+              children: [
+                for (final project in _projects.reversed)
+                  ListTile(
+                    leading: Icon(project.id == _projectId
+                        ? Icons.movie_outlined : Icons.folder_outlined),
+                    title: Text(project.name),
+                    subtitle: Text(project.id == _projectId
+                        ? 'Currently open' : 'Tap to open'),
+                    trailing: project.id == _projectId
+                        ? const Icon(Icons.check_circle)
+                        : const Icon(Icons.chevron_right),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      unawaited(_switchProject(project.id));
+                    },
+                  ),
+              ],
+            )),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(children: [
+                Expanded(child: OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    unawaited(_renameProject());
+                  },
+                  icon: const Icon(Icons.edit_outlined),
+                  label: const Text('Rename current'),
+                )),
+                const SizedBox(width: 8),
+                Expanded(child: FilledButton.icon(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    unawaited(_newProject());
+                  },
+                  icon: const Icon(Icons.add),
+                  label: const Text('New project'),
+                )),
+              ]),
+            ),
+          ]),
+        ),
+      ),
+    );
   }
 
   @override
@@ -566,6 +839,24 @@ class _EditorScreenState extends State<EditorScreen> {
     });
   }
 
+  void _setSpeedAndSave(double speed) {
+    _setSpeed(speed);
+    unawaited(_save());
+  }
+
+  void _toggleReverse() {
+    final clip = _active;
+    if (clip == null || clip.isImage || _busy) return;
+    if (!clip.reverse && clip.end - clip.start > 10000) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Reverse currently supports clips up to 10 seconds. '
+            'Trim or split this clip first.'),
+      ));
+      return;
+    }
+    _change((c) => c.reverse = !c.reverse);
+  }
+
   void _setSpeed(double speed) {
     final clip = _active;
     if (clip == null || clip.isImage || _busy) return;
@@ -696,6 +987,52 @@ class _EditorScreenState extends State<EditorScreen> {
     if (mounted) setState(() => _message = 'Cancelling export…');
   }
 
+  Future<bool> _joinWithTransitions(List<String> parts,
+      List<double> durations, String output, double seconds) async {
+    final kind = _transition == 'Wipe' ? 'wipeleft' : 'fade';
+    final graph = <String>[];
+    for (var i = 0; i < parts.length; i++) {
+      graph.add('[' + i.toString() +
+          ':v]fps=30,format=yuv420p,settb=AVTB,' +
+          'setpts=PTS-STARTPTS[v' + i.toString() + ']');
+      graph.add('[' + i.toString() +
+          ':a]aresample=44100,asetpts=PTS-STARTPTS[a' +
+          i.toString() + ']');
+    }
+    var sum = durations.first;
+    for (var i = 1; i < parts.length; i++) {
+      final previousVideo = i == 1
+          ? 'v0' : 'vxf' + (i - 1).toString();
+      final previousAudio = i == 1
+          ? 'a0' : 'axf' + (i - 1).toString();
+      final at = (sum - i * seconds).clamp(0.0, double.infinity);
+      graph.add('[' + previousVideo + '][v' + i.toString() +
+          ']xfade=transition=' + kind +
+          ':duration=' + seconds.toStringAsFixed(3) +
+          ':offset=' + at.toStringAsFixed(3) +
+          '[vxf' + i.toString() + ']');
+      graph.add('[' + previousAudio + '][a' + i.toString() +
+          ']acrossfade=d=' + seconds.toStringAsFixed(3) +
+          '[axf' + i.toString() + ']');
+      sum += durations[i];
+    }
+    final finalIndex = (parts.length - 1).toString();
+    final expected = durations.fold<double>(0, (a, b) => a + b) -
+        seconds * (parts.length - 1);
+    return _run([
+      '-hide_banner', '-nostdin', '-loglevel', 'error',
+      for (final path in parts) ...['-i', path],
+      '-filter_complex', graph.join(';'),
+      '-map', '[vxf' + finalIndex + ']',
+      '-map', '[axf' + finalIndex + ']',
+      '-r', '30', '-c:v', 'mpeg4', '-q:v', '2',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac', '-b:a', '160k', '-ar', '44100', '-ac', '2',
+      '-t', expected.toStringAsFixed(3),
+      '-movflags', '+faststart', '-y', output,
+    ]);
+  }
+
   Future<void> _export() async {
     if (_busy || _clips.isEmpty) return;
     final confirmed = await showDialog<bool>(
@@ -737,6 +1074,7 @@ class _EditorScreenState extends State<EditorScreen> {
         _ => [1280, 720],
       };
       final parts = <String>[];
+      final partDurations = <double>[];
       for (var i = 0; i < _clips.length; i++) {
         if (_cancelled) throw StateError('Export cancelled');
         final clip = _clips[i];
@@ -756,6 +1094,8 @@ class _EditorScreenState extends State<EditorScreen> {
           'scale=' + size[0].toString() + ':' + size[1].toString() +
               ':force_original_aspect_ratio=increase',
           'crop=' + size[0].toString() + ':' + size[1].toString(),
+          if (clip.reverse && !clip.isImage)
+            'reverse,setpts=PTS-STARTPTS',
           if (clip.brightness != 0 || clip.contrast != 1 ||
               clip.saturation != 1)
             'eq=brightness=' + clip.brightness.toStringAsFixed(3) +
@@ -805,8 +1145,12 @@ class _EditorScreenState extends State<EditorScreen> {
             '-vf', filters,
           ],
           '-map', audio ? '0:a:0' : '1:a:0',
-          if (audio && !clip.isImage && clip.speed != 1)
-            ...['-af', _audioTempo(clip.speed)],
+          if (audio && !clip.isImage &&
+              (clip.speed != 1 || clip.reverse))
+            ...['-af', [
+              if (clip.reverse) 'areverse',
+              if (clip.speed != 1) _audioTempo(clip.speed),
+            ].join(',')],
           '-r', '30', '-fps_mode', 'cfr',
           '-c:v', 'mpeg4', '-q:v', '2', '-threads:v', '2',
           '-pix_fmt', 'yuv420p',
@@ -818,25 +1162,51 @@ class _EditorScreenState extends State<EditorScreen> {
           throw StateError('Could not encode clip ' + (i + 1).toString());
         }
         parts.add(output);
+        final encoded = await FFprobeKit.getMediaInformation(output);
+        final actualDuration = double.tryParse(
+            encoded.getMediaInformation()?.getDuration() ?? '');
+        partDurations.add(actualDuration != null && actualDuration > 0
+            ? actualDuration : _clipDuration(clip) / 1000);
       }
       if (_cancelled) throw StateError('Export cancelled');
       final partial = File(p.join(exports.path,
           'DroidVidEditor_' + stamp + '.partial.mp4'));
+      var transitionNote = '';
       if (parts.length == 1) {
         await File(parts.first).copy(partial.path);
       } else {
-        final list = File(p.join(work.path, stamp + '.concat.txt'));
-        await list.writeAsString(
-          parts.map((path) => "file '" + path + "'").join('\n') + '\n',
-          flush: true,
-        );
-        if (mounted) setState(() => _message = 'Joining clips…');
-        if (!await _run([
-          '-hide_banner', '-nostdin', '-loglevel', 'error',
-          '-f', 'concat', '-safe', '0', '-i', list.path,
-          '-c', 'copy', '-movflags', '+faststart', '-y', partial.path,
-        ])) {
-          throw StateError('Could not join edited clips');
+        var joined = false;
+        if (_transition != 'None') {
+          final shortest = partDurations.reduce(
+              (a, b) => a < b ? a : b);
+          final seconds = _transitionSeconds < shortest / 3
+              ? _transitionSeconds : shortest / 3;
+          if (seconds >= 0.20) {
+            if (mounted) setState(() =>
+                _message = 'Rendering ' + _transition + ' transitions…');
+            joined = await _joinWithTransitions(
+                parts, partDurations, partial.path, seconds);
+            if (!joined) {
+              transitionNote = ' Transitions failed; used straight cuts.';
+            }
+          } else {
+            transitionNote = ' Clips too short for transitions; used cuts.';
+          }
+        }
+        if (!joined) {
+          final list = File(p.join(work.path, stamp + '.concat.txt'));
+          await list.writeAsString(
+            parts.map((path) => "file '" + path + "'").join('\n') + '\n',
+            flush: true,
+          );
+          if (mounted) setState(() => _message = 'Joining clips…');
+          if (!await _run([
+            '-hide_banner', '-nostdin', '-loglevel', 'error',
+            '-f', 'concat', '-safe', '0', '-i', list.path,
+            '-c', 'copy', '-movflags', '+faststart', '-y', partial.path,
+          ])) {
+            throw StateError('Could not join edited clips');
+          }
         }
       }
       if (_cancelled) throw StateError('Export cancelled');
@@ -858,7 +1228,7 @@ class _EditorScreenState extends State<EditorScreen> {
       } catch (error) {
         message += ' Gallery copy failed: $error';
       }
-      if (mounted) setState(() => _message = message);
+      if (mounted) setState(() => _message = message + transitionNote);
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     } finally {
@@ -1296,8 +1666,8 @@ class _EditorScreenState extends State<EditorScreen> {
           Row(children: [
             const Text('Speed'),
             Expanded(child: Slider(
-              min: 0.25, max: 3, divisions: 11,
-              value: clip.speed.clamp(0.25, 3.0).toDouble(),
+              min: 0.1, max: 3, divisions: 29,
+              value: clip.speed.clamp(0.1, 3.0).toDouble(),
               onChanged: editable ? _setSpeed : null,
               onChangeEnd: editable
                   ? (_) => unawaited(_save()) : null,
@@ -1305,8 +1675,31 @@ class _EditorScreenState extends State<EditorScreen> {
             Text(clip.speed.toStringAsFixed(2) + '×'),
           ]),
         ],
+        Wrap(spacing: 7, runSpacing: 5, children: [
+          if (clip != null && !clip.isImage)
+            OutlinedButton.icon(
+              onPressed: editable ? () => _setSpeedAndSave(0.2) : null,
+              icon: const Icon(Icons.slow_motion_video),
+              label: const Text('Slow-mo 0.2×'),
+            ),
+          if (clip != null && !clip.isImage)
+            OutlinedButton(
+              onPressed: editable ? () => _setSpeedAndSave(1) : null,
+              child: const Text('Normal 1×'),
+            ),
+          if (clip != null && !clip.isImage)
+            OutlinedButton.icon(
+              onPressed: editable ? _toggleReverse : null,
+              icon: const Icon(Icons.flip_camera_android_outlined),
+              label: Text(clip.reverse ? 'Reverse ON' : 'Reverse'),
+            ),
+        ]),
+        if (clip?.reverse == true)
+          const Text('Reverse is applied on export; the preview plays '
+              'forward. Reverse clips are limited to 10 seconds.',
+              style: TextStyle(fontSize: 11, color: Colors.amberAccent)),
         const SizedBox(height: 10),
-        const Text('Next: reverse, freeze frame, and drag-to-trim '
+        const Text('Next: freeze frame and drag-to-trim '
             'handles on the timeline.',
             style: TextStyle(fontSize: 12, color: Colors.white54)),
       ],
@@ -1510,6 +1903,51 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
+  Widget _transitionPanel() {
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      children: [
+        const Text('Transitions between clips',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 6),
+        const Text('Choose how consecutive clips connect. '
+            'The transition appears in the exported video; '
+            'live timeline preview still cuts between clips.',
+            style: TextStyle(fontSize: 12, color: Colors.white70)),
+        const SizedBox(height: 10),
+        Wrap(spacing: 8, runSpacing: 6, children: [
+          for (final kind in const ['None', 'Fade', 'Wipe'])
+            ChoiceChip(
+              label: Text(kind == 'Wipe' ? 'Wipe left' : kind),
+              selected: _transition == kind,
+              onSelected: _busy ? null : (_) {
+                setState(() => _transition = kind);
+                unawaited(_save());
+              },
+            ),
+        ]),
+        if (_transition != 'None')
+          Row(children: [
+            const Text('Duration'),
+            Expanded(child: Slider(
+              min: 0.25, max: 1, divisions: 3,
+              value: _transitionSeconds.clamp(0.25, 1).toDouble(),
+              onChanged: _busy ? null : (value) =>
+                  setState(() => _transitionSeconds = value),
+              onChangeEnd: _busy
+                  ? null : (_) => unawaited(_save()),
+            )),
+            Text(_transitionSeconds.toStringAsFixed(2) + 's'),
+          ]),
+        const SizedBox(height: 8),
+        Text(_clips.length.toString() + ' clips • ' +
+            (_clips.length < 2 ? 'Import two or more clips.' :
+                'Applies at each clip boundary.'),
+            style: const TextStyle(fontSize: 12, color: Colors.white70)),
+      ],
+    );
+  }
+
   Widget _plannedPanel(String title, List<String> features) {
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1546,6 +1984,8 @@ class _EditorScreenState extends State<EditorScreen> {
         return _layersPanel(clip);
       case 'Clips':
         return _timelinePanel(clip);
+      case 'Transition':
+        return _transitionPanel();
       case 'Beauty':
         return _plannedPanel('Face & skin beauty', const [
           'Smooth skin', 'Face shape', 'Jawline', 'Eyes', 'Nose',
@@ -1588,6 +2028,7 @@ class _EditorScreenState extends State<EditorScreen> {
       ('Adjust', Icons.tune),
       ('Layers', Icons.layers_outlined),
       ('Clips', Icons.view_timeline),
+      ('Transition', Icons.animation),
       ('Beauty', Icons.face_retouching_natural),
       ('Makeup', Icons.brush),
       ('Body', Icons.accessibility_new),
@@ -1717,8 +2158,21 @@ class _EditorScreenState extends State<EditorScreen> {
     final player = _player;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Droid Vid Editor'),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Droid Vid Editor', style: TextStyle(fontSize: 18)),
+            Text(_projectName, maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12)),
+          ],
+        ),
         actions: [
+          IconButton(
+            tooltip: 'Saved projects',
+            onPressed: _busy ? null : () => unawaited(_showProjects()),
+            icon: const Icon(Icons.folder_open_outlined),
+          ),
           IconButton(
             tooltip: 'Save current project',
             onPressed: _busy ? null : () => unawaited(_save()),
