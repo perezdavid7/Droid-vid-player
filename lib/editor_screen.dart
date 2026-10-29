@@ -17,7 +17,12 @@ import 'package:video_player/video_player.dart';
 class EditorClip {
   EditorClip(this.id, this.path, this.name, this.length, this.start, this.end,
       {this.turns = 0, this.zoom = 1, this.x = 0.5, this.y = 0.5,
-      this.isImage = false, this.imageWidth = 0, this.imageHeight = 0});
+      this.isImage = false, this.imageWidth = 0, this.imageHeight = 0,
+      this.speed = 1, this.brightness = 0, this.contrast = 1,
+      this.saturation = 1, this.clarity = 0, this.overlayPath,
+      this.overlayWidth = 0, this.overlayHeight = 0,
+      this.overlaySize = 0.35, this.overlayX = 0.5, this.overlayY = 0.5,
+      this.overlayOpacity = 1});
   final int id;
   final String path;
   final String name;
@@ -31,17 +36,41 @@ class EditorClip {
   final bool isImage;
   final int imageWidth;
   final int imageHeight;
+  double speed;
+  double brightness;
+  double contrast;
+  double saturation;
+  double clarity;
+  String? overlayPath;
+  int overlayWidth;
+  int overlayHeight;
+  double overlaySize;
+  double overlayX;
+  double overlayY;
+  double overlayOpacity;
 
   EditorClip duplicate(int newId) =>
       EditorClip(newId, path, name, length, start, end,
           turns: turns, zoom: zoom, x: x, y: y,
-          isImage: isImage, imageWidth: imageWidth, imageHeight: imageHeight);
+          isImage: isImage, imageWidth: imageWidth, imageHeight: imageHeight,
+          speed: speed, brightness: brightness, contrast: contrast,
+          saturation: saturation, clarity: clarity,
+          overlayPath: overlayPath, overlayWidth: overlayWidth,
+          overlayHeight: overlayHeight, overlaySize: overlaySize,
+          overlayX: overlayX, overlayY: overlayY,
+          overlayOpacity: overlayOpacity);
 
-  Map<String, Object> toJson() => {
+  Map<String, Object?> toJson() => {
     'id': id, 'path': path, 'name': name, 'length': length,
     'start': start, 'end': end, 'turns': turns, 'zoom': zoom,
     'x': x, 'y': y, 'isImage': isImage,
     'imageWidth': imageWidth, 'imageHeight': imageHeight,
+    'speed': speed, 'brightness': brightness, 'contrast': contrast,
+    'saturation': saturation, 'clarity': clarity,
+    'overlayPath': overlayPath, 'overlayWidth': overlayWidth,
+    'overlayHeight': overlayHeight, 'overlaySize': overlaySize,
+    'overlayX': overlayX, 'overlayY': overlayY,
+    'overlayOpacity': overlayOpacity,
   };
 
   factory EditorClip.fromJson(Map<String, dynamic> data) => EditorClip(
@@ -58,6 +87,18 @@ class EditorClip {
     isImage: data['isImage'] == true,
     imageWidth: (data['imageWidth'] as num?)?.toInt() ?? 0,
     imageHeight: (data['imageHeight'] as num?)?.toInt() ?? 0,
+    speed: (data['speed'] as num?)?.toDouble() ?? 1,
+    brightness: (data['brightness'] as num?)?.toDouble() ?? 0,
+    contrast: (data['contrast'] as num?)?.toDouble() ?? 1,
+    saturation: (data['saturation'] as num?)?.toDouble() ?? 1,
+    clarity: (data['clarity'] as num?)?.toDouble() ?? 0,
+    overlayPath: data['overlayPath'] as String?,
+    overlayWidth: (data['overlayWidth'] as num?)?.toInt() ?? 0,
+    overlayHeight: (data['overlayHeight'] as num?)?.toInt() ?? 0,
+    overlaySize: (data['overlaySize'] as num?)?.toDouble() ?? 0.35,
+    overlayX: (data['overlayX'] as num?)?.toDouble() ?? 0.5,
+    overlayY: (data['overlayY'] as num?)?.toDouble() ?? 0.5,
+    overlayOpacity: (data['overlayOpacity'] as num?)?.toDouble() ?? 1,
   );
 }
 
@@ -86,6 +127,7 @@ class _EditorScreenState extends State<EditorScreen> {
   String? _error;
   String _section = 'Edit';
   double _gestureStartZoom = 1;
+  double _overlayGestureStartSize = 0.35;
 
   EditorClip? get _active {
     for (final c in _clips) {
@@ -94,14 +136,18 @@ class _EditorScreenState extends State<EditorScreen> {
     return null;
   }
 
+  int _clipDuration(EditorClip clip) => clip.isImage
+      ? clip.end - clip.start
+      : ((clip.end - clip.start) / clip.speed).round();
+
   int get _timelineLength =>
-      _clips.fold<int>(0, (sum, c) => sum + c.end - c.start);
+      _clips.fold<int>(0, (sum, c) => sum + _clipDuration(c));
 
   int _clipOffset(EditorClip clip) {
     var elapsed = 0;
     for (final item in _clips) {
       if (item.id == clip.id) return elapsed;
-      elapsed += item.end - item.start;
+      elapsed += _clipDuration(item);
     }
     return 0;
   }
@@ -110,7 +156,8 @@ class _EditorScreenState extends State<EditorScreen> {
     final clip = _active;
     if (clip == null) return 0;
     return _clipOffset(clip) +
-        (_at - clip.start).clamp(0, clip.end - clip.start);
+        ((_at - clip.start) / clip.speed)
+            .round().clamp(0, _clipDuration(clip));
   }
 
   String _time(int ms) {
@@ -224,6 +271,7 @@ class _EditorScreenState extends State<EditorScreen> {
         return;
       }
       await next.seekTo(Duration(milliseconds: target));
+      await next.setPlaybackSpeed(clip.speed);
       next.addListener(_watch);
       setState(() => _player = next);
       if (autoplay) {
@@ -331,9 +379,10 @@ class _EditorScreenState extends State<EditorScreen> {
     var remaining = target.clamp(0, _timelineLength);
     for (var i = 0; i < _clips.length; i++) {
       final clip = _clips[i];
-      final duration = clip.end - clip.start;
+      final duration = _clipDuration(clip);
       if (remaining < duration || i == _clips.length - 1) {
-        final sourcePosition = clip.start + remaining.clamp(0, duration);
+        final sourcePosition = clip.start +
+            (remaining.clamp(0, duration) * clip.speed).round();
         if (clip.id == _activeId &&
             (clip.isImage || _player != null)) {
           if (clip.isImage) {
@@ -455,6 +504,76 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
+  Future<void> _addPhotoOverlay() async {
+    final clip = _active;
+    if (clip == null || _busy) return;
+    final picked = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['jpg', 'jpeg', 'png', 'webp'],
+    );
+    if (picked.isEmpty || !mounted) return;
+    final source = picked.first.path;
+    if (source == null || !await File(source).exists()) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final dir = Directory(p.join((await _root()).path, 'media'));
+      await dir.create(recursive: true);
+      final name = 'overlay_' +
+          DateTime.now().microsecondsSinceEpoch.toString() +
+          p.extension(picked.first.name);
+      final copy = await File(source).copy(p.join(dir.path, name));
+      final codec = await ui.instantiateImageCodec(
+          await copy.readAsBytes(), targetWidth: 512);
+      try {
+        final frame = await codec.getNextFrame();
+        final width = frame.image.width;
+        final height = frame.image.height;
+        frame.image.dispose();
+        if (width <= 0 || height <= 0) {
+          throw StateError('Invalid overlay picture');
+        }
+        if (!mounted) return;
+        setState(() {
+          clip.overlayPath = copy.path;
+          clip.overlayWidth = width;
+          clip.overlayHeight = height;
+          clip.overlaySize = 0.35;
+          clip.overlayX = 0.5;
+          clip.overlayY = 0.5;
+          clip.overlayOpacity = 1;
+          _section = 'Layers';
+          _message = 'Photo layer added to this clip.';
+        });
+        await _save();
+      } finally {
+        codec.dispose();
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = 'Layer import failed: $error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _removeOverlay() {
+    _change((clip) {
+      clip.overlayPath = null;
+      clip.overlayWidth = 0;
+      clip.overlayHeight = 0;
+    });
+  }
+
+  void _setSpeed(double speed) {
+    final clip = _active;
+    if (clip == null || clip.isImage || _busy) return;
+    setState(() => clip.speed = speed);
+    final player = _player;
+    if (player != null) unawaited(player.setPlaybackSpeed(speed));
+  }
+
   void _change(void Function(EditorClip) update) {
     final clip = _active;
     if (clip == null || _busy) return;
@@ -555,6 +674,21 @@ class _EditorScreenState extends State<EditorScreen> {
     }
   }
 
+  String _audioTempo(double speed) {
+    var remaining = speed;
+    final stages = <String>[];
+    while (remaining < 0.5) {
+      stages.add('atempo=0.5');
+      remaining /= 0.5;
+    }
+    while (remaining > 2) {
+      stages.add('atempo=2.0');
+      remaining /= 2;
+    }
+    stages.add('atempo=' + remaining.toStringAsFixed(3));
+    return stages.join(',');
+  }
+
   void _cancelExport() {
     _cancelled = true;
     final id = _sessionId;
@@ -612,6 +746,8 @@ class _EditorScreenState extends State<EditorScreen> {
               ' of ' + _clips.length.toString() + '…');
         }
         final filters = <String>[
+          if (!clip.isImage)
+            'setpts=(PTS-STARTPTS)/' + clip.speed.toStringAsFixed(3),
           ...List.filled(clip.turns % 4, 'transpose=1'),
           'crop=iw/' + clip.zoom.toStringAsFixed(3) +
               ':ih/' + clip.zoom.toStringAsFixed(3) +
@@ -620,29 +756,62 @@ class _EditorScreenState extends State<EditorScreen> {
           'scale=' + size[0].toString() + ':' + size[1].toString() +
               ':force_original_aspect_ratio=increase',
           'crop=' + size[0].toString() + ':' + size[1].toString(),
+          if (clip.brightness != 0 || clip.contrast != 1 ||
+              clip.saturation != 1)
+            'eq=brightness=' + clip.brightness.toStringAsFixed(3) +
+                ':contrast=' + clip.contrast.toStringAsFixed(3) +
+                ':saturation=' + clip.saturation.toStringAsFixed(3),
+          if (clip.clarity > 0.001)
+            'unsharp=5:5:' + clip.clarity.toStringAsFixed(3),
           'setsar=1',
         ].join(',');
         final output = p.join(work.path,
             stamp + '_clip_' + i.toString() + '.mp4');
         final audio = clip.isImage ? false : await _hasAudio(clip.path);
+        final hasOverlay = clip.overlayPath != null &&
+            await File(clip.overlayPath!).exists();
+        final overlayIndex = audio ? 1 : 2;
+        final layerWidth = (size[0] * clip.overlaySize).round().clamp(2, size[0]);
+        final layerFilter = '[' + overlayIndex.toString() + ':v]' +
+            'scale=' + layerWidth.toString() + ':-2,format=rgba,' +
+            'colorchannelmixer=aa=' +
+            clip.overlayOpacity.toStringAsFixed(3) + '[layer]';
+        final composite = '[0:v]' + filters + '[base];' +
+            layerFilter + ';[base][layer]overlay=x=W*' +
+            clip.overlayX.toStringAsFixed(3) + '-w/2:y=H*' +
+            clip.overlayY.toStringAsFixed(3) + '-h/2' +
+            ':format=auto[vout]';
         final arguments = <String>[
           '-hide_banner', '-nostdin', '-loglevel', 'error',
           if (clip.isImage) ...[
             '-loop', '1', '-framerate', '30',
+          ] else ...[
+            '-ss', (clip.start / 1000).toStringAsFixed(3),
           ],
+          '-t', ((clip.end - clip.start) / 1000).toStringAsFixed(3),
           '-i', clip.path,
           if (!audio) ...[
             '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
           ],
-          if (!clip.isImage)
-            ...['-ss', (clip.start / 1000).toStringAsFixed(3)],
-          '-t', ((clip.end - clip.start) / 1000).toStringAsFixed(3),
-          '-map', '0:v:0', '-map', audio ? '0:a:0' : '1:a:0',
-          '-vf', filters,
+          if (hasOverlay) ...[
+            '-loop', '1', '-framerate', '30',
+            '-i', clip.overlayPath!,
+          ],
+          if (hasOverlay) ...[
+            '-filter_complex', composite,
+            '-map', '[vout]',
+          ] else ...[
+            '-map', '0:v:0',
+            '-vf', filters,
+          ],
+          '-map', audio ? '0:a:0' : '1:a:0',
+          if (audio && !clip.isImage && clip.speed != 1)
+            ...['-af', _audioTempo(clip.speed)],
           '-r', '30', '-fps_mode', 'cfr',
           '-c:v', 'mpeg4', '-q:v', '2', '-threads:v', '2',
           '-pix_fmt', 'yuv420p',
           '-c:a', 'aac', '-b:a', '160k', '-ar', '44100', '-ac', '2',
+          '-t', (_clipDuration(clip) / 1000).toStringAsFixed(3),
           '-y', output,
         ];
         if (!await _run(arguments) || !await File(output).exists()) {
@@ -751,6 +920,24 @@ class _EditorScreenState extends State<EditorScreen> {
     });
   }
 
+  List<double> _colorMatrix(EditorClip clip) {
+    final saturation = clip.saturation;
+    final contrast = clip.contrast;
+    final red = 0.2126 * (1 - saturation);
+    final green = 0.7152 * (1 - saturation);
+    final blue = 0.0722 * (1 - saturation);
+    final offset = (1 - contrast) * 128 + clip.brightness * 255;
+    return [
+      contrast * (red + saturation), contrast * green,
+      contrast * blue, 0, offset,
+      contrast * red, contrast * (green + saturation),
+      contrast * blue, 0, offset,
+      contrast * red, contrast * green,
+      contrast * (blue + saturation), 0, offset,
+      0, 0, 0, 1, 0,
+    ];
+  }
+
   Widget _videoFrame(EditorClip? clip, VideoPlayerController? player) {
     final ratio = switch (_ratio) {
       '9:16' => 9 / 16,
@@ -816,9 +1003,12 @@ class _EditorScreenState extends State<EditorScreen> {
                             child: SizedBox(
                               width: displayWidth,
                               height: displayHeight,
-                              child: RotatedBox(
-                                quarterTurns: clip.turns,
-                                child: clip.isImage
+                              child: ColorFiltered(
+                                colorFilter: ColorFilter.matrix(
+                                    _colorMatrix(clip)),
+                                child: RotatedBox(
+                                  quarterTurns: clip.turns,
+                                  child: clip.isImage
                                     ? Image.file(File(clip.path),
                                         fit: BoxFit.fill,
                                         cacheWidth: 1080,
@@ -826,12 +1016,53 @@ class _EditorScreenState extends State<EditorScreen> {
                                             const Center(child:
                                                 Text('Photo unavailable')))
                                     : VideoPlayer(player!),
+                                ),
                               ),
                             ),
                           ),
                         ),
                       ),
                     ),
+                    if (clip.overlayPath != null &&
+                        clip.overlayWidth > 0 && clip.overlayHeight > 0)
+                      Positioned(
+                        left: clip.overlayX * frame.width -
+                            frame.width * clip.overlaySize / 2,
+                        top: clip.overlayY * frame.height -
+                            frame.width * clip.overlaySize *
+                                clip.overlayHeight / clip.overlayWidth / 2,
+                        child: GestureDetector(
+                          onScaleStart: _busy ? null : (_) {
+                            _overlayGestureStartSize = clip.overlaySize;
+                            _pausePreview();
+                          },
+                          onScaleUpdate: _busy ? null : (details) {
+                            setState(() {
+                              clip.overlaySize =
+                                  (_overlayGestureStartSize * details.scale)
+                                      .clamp(0.1, 0.9).toDouble();
+                              clip.overlayX = (clip.overlayX +
+                                  details.focalPointDelta.dx / frame.width)
+                                      .clamp(0.0, 1.0).toDouble();
+                              clip.overlayY = (clip.overlayY +
+                                  details.focalPointDelta.dy / frame.height)
+                                      .clamp(0.0, 1.0).toDouble();
+                            });
+                          },
+                          onScaleEnd: _busy ? null :
+                              (_) => unawaited(_save()),
+                          child: Opacity(
+                            opacity: clip.overlayOpacity,
+                            child: Image.file(File(clip.overlayPath!),
+                              width: frame.width * clip.overlaySize,
+                              height: frame.width * clip.overlaySize *
+                                  clip.overlayHeight / clip.overlayWidth,
+                              fit: BoxFit.fill,
+                              cacheWidth: 800,
+                            ),
+                          ),
+                        ),
+                      ),
                     if (!_busy)
                       const Positioned(
                         left: 8,
@@ -934,7 +1165,7 @@ class _EditorScreenState extends State<EditorScreen> {
             itemCount: _clips.length,
             itemBuilder: (context, index) {
               final item = _clips[index];
-              final duration = item.end - item.start;
+              final duration = _clipDuration(item);
               final width =
                   (duration / 1000 * 12).clamp(100.0, 250.0).toDouble();
               final selected = item.id == _activeId;
@@ -1011,7 +1242,7 @@ class _EditorScreenState extends State<EditorScreen> {
         const SizedBox(height: 9),
         if (clip != null)
           Text('Start ' + _time(clip.start) + '   End ' + _time(clip.end) +
-              '   Duration ' + _time(clip.end - clip.start)),
+              '   Duration ' + _time(_clipDuration(clip))),
         const SizedBox(height: 9),
         Wrap(spacing: 8, runSpacing: 6, children: [
           if (clip?.isImage != true)
@@ -1059,8 +1290,22 @@ class _EditorScreenState extends State<EditorScreen> {
             Text(((clip.end - clip.start) / 1000).round().toString() + 's'),
           ]),
         ],
+        if (clip != null && !clip.isImage) ...[
+          const SizedBox(height: 9),
+          Row(children: [
+            const Text('Speed'),
+            Expanded(child: Slider(
+              min: 0.25, max: 3, divisions: 11,
+              value: clip.speed.clamp(0.25, 3.0).toDouble(),
+              onChanged: editable ? _setSpeed : null,
+              onChangeEnd: editable
+                  ? (_) => unawaited(_save()) : null,
+            )),
+            Text(clip.speed.toStringAsFixed(2) + '×'),
+          ]),
+        ],
         const SizedBox(height: 10),
-        const Text('Next: speed, reverse, freeze frame, and drag-to-trim '
+        const Text('Next: reverse, freeze frame, and drag-to-trim '
             'handles on the timeline.',
             style: TextStyle(fontSize: 12, color: Colors.white54)),
       ],
@@ -1125,6 +1370,145 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
+  Widget _colorPanel(EditorClip? clip) {
+    final editable = clip != null && !_busy;
+    if (clip == null) {
+      return const Center(child: Text('Import a clip to adjust its color'));
+    }
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      children: [
+        Row(children: [
+          const Expanded(child: Text('Light & clarity',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold))),
+          TextButton.icon(
+            onPressed: editable ? () => _change((c) {
+              c.brightness = 0;
+              c.contrast = 1;
+              c.saturation = 1;
+              c.clarity = 0;
+            }) : null,
+            icon: const Icon(Icons.restart_alt),
+            label: const Text('Reset'),
+          ),
+        ]),
+        Row(children: [
+          const SizedBox(width: 86, child: Text('Brightness')),
+          Expanded(child: Slider(
+            min: -0.5, max: 0.5,
+            value: clip.brightness.clamp(-0.5, 0.5).toDouble(),
+            onChanged: editable
+                ? (v) => setState(() => clip.brightness = v) : null,
+            onChangeEnd: editable ? (_) => unawaited(_save()) : null,
+          )),
+          SizedBox(width: 35, child: Text(
+              clip.brightness.toStringAsFixed(2),
+              style: const TextStyle(fontSize: 11))),
+        ]),
+        Row(children: [
+          const SizedBox(width: 86, child: Text('Contrast')),
+          Expanded(child: Slider(
+            min: 0.5, max: 1.5,
+            value: clip.contrast.clamp(0.5, 1.5).toDouble(),
+            onChanged: editable
+                ? (v) => setState(() => clip.contrast = v) : null,
+            onChangeEnd: editable ? (_) => unawaited(_save()) : null,
+          )),
+          SizedBox(width: 35, child: Text(
+              clip.contrast.toStringAsFixed(2),
+              style: const TextStyle(fontSize: 11))),
+        ]),
+        Row(children: [
+          const SizedBox(width: 86, child: Text('Saturation')),
+          Expanded(child: Slider(
+            min: 0, max: 2,
+            value: clip.saturation.clamp(0.0, 2.0).toDouble(),
+            onChanged: editable
+                ? (v) => setState(() => clip.saturation = v) : null,
+            onChangeEnd: editable ? (_) => unawaited(_save()) : null,
+          )),
+          SizedBox(width: 35, child: Text(
+              clip.saturation.toStringAsFixed(2),
+              style: const TextStyle(fontSize: 11))),
+        ]),
+        Row(children: [
+          const SizedBox(width: 86, child: Text('Clarity')),
+          Expanded(child: Slider(
+            min: 0, max: 1.5,
+            value: clip.clarity.clamp(0.0, 1.5).toDouble(),
+            onChanged: editable
+                ? (v) => setState(() => clip.clarity = v) : null,
+            onChangeEnd: editable ? (_) => unawaited(_save()) : null,
+          )),
+          SizedBox(width: 35, child: Text(
+              clip.clarity.toStringAsFixed(2),
+              style: const TextStyle(fontSize: 11))),
+        ]),
+        const Text('Brightness, contrast, and saturation preview live. '
+            'Clarity sharpening is applied on export.',
+            style: TextStyle(fontSize: 11, color: Colors.white70)),
+      ],
+    );
+  }
+
+  Widget _layersPanel(EditorClip? clip) {
+    final editable = clip != null && !_busy;
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      children: [
+        const Text('Photo overlay layer',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 4),
+        const Text('Add a picture over the selected video or photo. '
+            'Drag the layer on the preview and pinch to resize.',
+            style: TextStyle(fontSize: 12, color: Colors.white70)),
+        const SizedBox(height: 9),
+        Wrap(spacing: 8, runSpacing: 6, children: [
+          OutlinedButton.icon(
+            onPressed: editable ? () => unawaited(_addPhotoOverlay()) : null,
+            icon: const Icon(Icons.add_photo_alternate_outlined),
+            label: Text(clip?.overlayPath == null
+                ? 'Add photo layer' : 'Replace photo layer'),
+          ),
+          OutlinedButton.icon(
+            onPressed: editable && clip?.overlayPath != null
+                ? _removeOverlay : null,
+            icon: const Icon(Icons.layers_clear),
+            label: const Text('Remove layer'),
+          ),
+        ]),
+        if (clip != null && clip.overlayPath != null) ...[
+          Row(children: [
+            const Text('Size'),
+            Expanded(child: Slider(
+              min: 0.1, max: 0.9,
+              value: clip.overlaySize.clamp(0.1, 0.9).toDouble(),
+              onChanged: editable
+                  ? (v) => setState(() => clip.overlaySize = v) : null,
+              onChangeEnd: editable ? (_) => unawaited(_save()) : null,
+            )),
+            Text((clip.overlaySize * 100).round().toString() + '%'),
+          ]),
+          Row(children: [
+            const Text('Opacity'),
+            Expanded(child: Slider(
+              min: 0.1, max: 1,
+              value: clip.overlayOpacity.clamp(0.1, 1.0).toDouble(),
+              onChanged: editable
+                  ? (v) => setState(() => clip.overlayOpacity = v) : null,
+              onChangeEnd: editable ? (_) => unawaited(_save()) : null,
+            )),
+            Text((clip.overlayOpacity * 100).round().toString() + '%'),
+          ]),
+        ],
+        const SizedBox(height: 8),
+        const Text('This first layer lasts for the selected clip. '
+            'Multiple independent video tracks are next.',
+            style: TextStyle(fontSize: 11, color: Colors.white54)),
+      ],
+    );
+  }
+
   Widget _plannedPanel(String title, List<String> features) {
     return ListView(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1155,6 +1539,10 @@ class _EditorScreenState extends State<EditorScreen> {
     switch (_section) {
       case 'Canvas':
         return _canvasPanel(clip);
+      case 'Adjust':
+        return _colorPanel(clip);
+      case 'Layers':
+        return _layersPanel(clip);
       case 'Clips':
         return _timelinePanel(clip);
       case 'Beauty':
@@ -1196,6 +1584,8 @@ class _EditorScreenState extends State<EditorScreen> {
     const categories = <(String, IconData)>[
       ('Edit', Icons.content_cut),
       ('Canvas', Icons.crop_rotate),
+      ('Adjust', Icons.tune),
+      ('Layers', Icons.layers_outlined),
       ('Clips', Icons.view_timeline),
       ('Beauty', Icons.face_retouching_natural),
       ('Makeup', Icons.brush),
@@ -1251,7 +1641,7 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
   Widget _timelinePanel(EditorClip? clip) {
-    final totalMs = _clips.fold<int>(0, (sum, c) => sum + c.end - c.start);
+    final totalMs = _timelineLength;
     return Column(children: [
       Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1281,7 +1671,7 @@ class _EditorScreenState extends State<EditorScreen> {
                       ),
                       title: Text(item.name,
                           maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(_time(item.end - item.start) +
+                      subtitle: Text(_time(_clipDuration(item)) +
                           ' • Tap to edit this clip'),
                       onTap: _busy ? null : () {
                         setState(() => _section = 'Edit');
