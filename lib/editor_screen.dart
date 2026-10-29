@@ -346,6 +346,11 @@ class _EditorScreenState extends State<EditorScreen> {
             final id = _projects.any((p) => p.id == active)
                 ? active! : _projects.first.id;
             await _loadProject(id);
+            if (_projects.length > 1) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) unawaited(_showProjects());
+              });
+            }
             return;
           }
         }
@@ -411,8 +416,20 @@ class _EditorScreenState extends State<EditorScreen> {
 
   Future<void> _switchProject(String id) async {
     if (_busy || id == _projectId) return;
+    final previous = _projectId;
     await _save();
-    await _loadProject(id);
+    try {
+      await _loadProject(id);
+    } catch (error) {
+      if (previous != null && previous != id) {
+        try {
+          await _loadProject(previous);
+        } catch (_) {}
+      }
+      if (mounted) {
+        setState(() => _error = 'Could not open project: $error');
+      }
+    }
   }
 
   Future<void> _renameProject() async {
