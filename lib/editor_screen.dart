@@ -1991,7 +1991,9 @@ class _EditorScreenState extends State<EditorScreen> {
 
   bool _handleTimelineScroll(ScrollNotification notification) {
     if (_timelinePinching || _audioHandleDragging ||
-        _busy || _clips.isEmpty) return false;
+        _busy || _clips.isEmpty) {
+      return false;
+    }
     if (notification is ScrollStartNotification &&
         notification.dragDetails != null) {
       _pausePreview();
@@ -2795,7 +2797,7 @@ class _EditorScreenState extends State<EditorScreen> {
               }
               : const Center(child: Text(
                   'Enable ramp to slow a portion, then return to normal.',
-                  style: TextStyle(fontSize: 12))),
+                  style: TextStyle(fontSize: 12)))),
           ]);
         case 'Photo duration':
           if (!clip.isImage) {
