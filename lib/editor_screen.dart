@@ -1204,7 +1204,8 @@ class _EditorScreenState extends State<EditorScreen> {
                                 ? colors.onPrimaryContainer : colors.onSurface,
                           )),
                       const Spacer(),
-                      Text(_time(duration),
+                      Text(_time(duration) +
+                          (item.overlayPath != null ? ' • Layer' : ''),
                           style: TextStyle(fontSize: 11,
                               color: selected ? colors.onPrimaryContainer
                                   : colors.onSurfaceVariant)),
@@ -1471,7 +1472,7 @@ class _EditorScreenState extends State<EditorScreen> {
                 ? 'Add photo layer' : 'Replace photo layer'),
           ),
           OutlinedButton.icon(
-            onPressed: editable && clip?.overlayPath != null
+            onPressed: editable && clip.overlayPath != null
                 ? _removeOverlay : null,
             icon: const Icon(Icons.layers_clear),
             label: const Text('Remove layer'),
