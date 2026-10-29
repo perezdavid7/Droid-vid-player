@@ -1585,7 +1585,9 @@ class _EditorScreenState extends State<EditorScreen> {
     if (!_timelineFingers.containsKey(event.pointer)) return;
     _timelineFingers[event.pointer] = event.localPosition;
     if (!_timelinePinching || _timelineFingers.length < 2 ||
-        _pinchBaseDistance < 1) return;
+        _pinchBaseDistance < 1) {
+      return;
+    }
     final fingers = _timelineFingers.values.take(2).toList();
     final distance = (fingers[0] - fingers[1]).distance;
     final next = (_pinchBasePixels * distance / _pinchBaseDistance)
@@ -1747,7 +1749,7 @@ class _EditorScreenState extends State<EditorScreen> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text('${index}. ${item.isImage ? 'Photo: ' : ''}${item.name}',
+                                  Text('$index. ${item.isImage ? 'Photo: ' : ''}${item.name}',
                                     maxLines: 1, overflow: TextOverflow.ellipsis,
                                     style: TextStyle(fontSize: 10,
                                         color: selected
