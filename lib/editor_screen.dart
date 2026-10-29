@@ -84,7 +84,7 @@ class _EditorScreenState extends State<EditorScreen> {
   String _ratio = '16:9';
   String _message = 'Import photos or videos. Originals stay untouched.';
   String? _error;
-  int _panel = 0;
+  String _section = 'Edit';
   double _gestureStartZoom = 1;
 
   EditorClip? get _active {
@@ -486,6 +486,16 @@ class _EditorScreenState extends State<EditorScreen> {
       clip.end = _at;
       _clips.insert(_clips.indexOf(clip) + 1, second);
       _message = 'Split complete. Both pieces are retained.';
+    });
+    unawaited(_save());
+  }
+
+  void _duplicate() {
+    final clip = _active;
+    if (clip == null || _busy) return;
+    setState(() {
+      _clips.insert(_clips.indexOf(clip) + 1, clip.duplicate(_nextId++));
+      _message = 'Clip duplicated next to the original.';
     });
     unawaited(_save());
   }
@@ -985,45 +995,55 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  Widget _adjustPanel(EditorClip? clip) {
+  Widget _editPanel(EditorClip? clip) {
     final editable = clip != null && !_busy;
     return ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       children: [
-        const Text('Touch the preview above to reframe it.',
-            style: TextStyle(fontWeight: FontWeight.w600)),
-        const SizedBox(height: 6),
-        const Text('Pinch with two fingers to zoom. Drag with one finger '
-            'to reposition the enlarged picture. The final MP4 uses '
-            'these framing settings.',
-            style: TextStyle(color: Colors.white70)),
-        const SizedBox(height: 10),
-        Wrap(spacing: 6, runSpacing: 4, children: [
+        Text(clip == null ? 'Edit clips'
+            : 'Edit • ' + clip.name,
+            maxLines: 1, overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 5),
+        const Text('Move the timeline playhead to a moment, then trim, '
+            'split, or remove the selected clip.',
+            style: TextStyle(color: Colors.white70, fontSize: 12)),
+        const SizedBox(height: 9),
+        if (clip != null)
+          Text('Start ' + _time(clip.start) + '   End ' + _time(clip.end) +
+              '   Duration ' + _time(clip.end - clip.start)),
+        const SizedBox(height: 9),
+        Wrap(spacing: 8, runSpacing: 6, children: [
+          if (clip?.isImage != true)
+            OutlinedButton.icon(
+              onPressed: editable ? _setIn : null,
+              icon: const Icon(Icons.first_page),
+              label: const Text('Trim start'),
+            ),
+          if (clip?.isImage != true)
+            OutlinedButton.icon(
+              onPressed: editable ? _setOut : null,
+              icon: const Icon(Icons.last_page),
+              label: const Text('Trim end'),
+            ),
           OutlinedButton.icon(
-            onPressed: editable ? _resetFrame : null,
-            icon: const Icon(Icons.center_focus_strong),
-            label: const Text('Reset picture'),
+            onPressed: editable ? _split : null,
+            icon: const Icon(Icons.content_cut),
+            label: const Text('Split'),
           ),
           OutlinedButton.icon(
-            onPressed: editable
-                ? () => _change((c) => c.turns = (c.turns + 1) % 4)
-                : null,
-            icon: const Icon(Icons.rotate_right),
-            label: const Text('Rotate 90°'),
+            onPressed: editable ? _duplicate : null,
+            icon: const Icon(Icons.copy_outlined),
+            label: const Text('Duplicate'),
+          ),
+          OutlinedButton.icon(
+            onPressed: editable ? _remove : null,
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('Delete'),
           ),
         ]),
-        Row(children: [
-          const Text('Zoom'),
-          Expanded(child: Slider(
-            min: 1, max: 3,
-            value: (clip?.zoom ?? 1).clamp(1.0, 3.0).toDouble(),
-            onChanged: editable ? (value) =>
-                setState(() => clip.zoom = value) : null,
-            onChangeEnd: editable ? (_) => unawaited(_save()) : null,
-          )),
-          Text((clip?.zoom ?? 1).toStringAsFixed(1) + '×'),
-        ]),
-        if (clip != null && clip.isImage)
+        if (clip != null && clip.isImage) ...[
+          const SizedBox(height: 10),
           Row(children: [
             const Text('Photo duration'),
             Expanded(child: Slider(
@@ -1038,15 +1058,61 @@ class _EditorScreenState extends State<EditorScreen> {
             )),
             Text(((clip.end - clip.start) / 1000).round().toString() + 's'),
           ]),
+        ],
+        const SizedBox(height: 10),
+        const Text('Next: speed, reverse, freeze frame, and drag-to-trim '
+            'handles on the timeline.',
+            style: TextStyle(fontSize: 12, color: Colors.white54)),
+      ],
+    );
+  }
+
+  Widget _canvasPanel(EditorClip? clip) {
+    final editable = clip != null && !_busy;
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      children: [
+        const Text('Canvas & framing',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 5),
+        const Text('Pinch the preview to zoom and drag it to pan. '
+            'See your framing while changing these controls.',
+            style: TextStyle(color: Colors.white70, fontSize: 12)),
+        const SizedBox(height: 8),
+        Wrap(spacing: 8, runSpacing: 6, children: [
+          OutlinedButton.icon(
+            onPressed: editable ? _resetFrame : null,
+            icon: const Icon(Icons.center_focus_strong),
+            label: const Text('Reset'),
+          ),
+          OutlinedButton.icon(
+            onPressed: editable
+                ? () => _change((c) => c.turns = (c.turns + 1) % 4)
+                : null,
+            icon: const Icon(Icons.rotate_right),
+            label: const Text('Rotate 90°'),
+          ),
+        ]),
         Row(children: [
-          const Text('Crop / output'),
-          const SizedBox(width: 12),
+          const Text('Zoom'),
+          Expanded(child: Slider(
+            min: 1, max: 3,
+            value: (clip?.zoom ?? 1).clamp(1.0, 3.0).toDouble(),
+            onChanged: editable
+                ? (value) => setState(() => clip.zoom = value) : null,
+            onChangeEnd: editable ? (_) => unawaited(_save()) : null,
+          )),
+          Text((clip?.zoom ?? 1).toStringAsFixed(1) + '×'),
+        ]),
+        Row(children: [
+          const Text('Output ratio'),
+          const SizedBox(width: 16),
           DropdownButton<String>(
             value: _ratio,
             items: const [
-              DropdownMenuItem(value: '16:9', child: Text('16:9')),
-              DropdownMenuItem(value: '9:16', child: Text('9:16')),
-              DropdownMenuItem(value: '1:1', child: Text('1:1')),
+              DropdownMenuItem(value: '16:9', child: Text('16:9 Landscape')),
+              DropdownMenuItem(value: '9:16', child: Text('9:16 Portrait')),
+              DropdownMenuItem(value: '1:1', child: Text('1:1 Square')),
             ],
             onChanged: _busy ? null : (value) {
               if (value == null) return;
@@ -1055,33 +1121,132 @@ class _EditorScreenState extends State<EditorScreen> {
             },
           ),
         ]),
-        const Divider(),
-        Text(clip == null ? 'Import a clip to begin trimming.'
-            : 'In ' + _time(clip.start) +
-              '   Out ' + _time(clip.end) +
-              '   Length ' + _time(clip.end - clip.start)),
-        const SizedBox(height: 8),
-        Wrap(spacing: 6, runSpacing: 4, children: [
-          if (clip?.isImage != true)
-            OutlinedButton(
-              onPressed: editable ? _setIn : null,
-              child: const Text('Set start'),
-            ),
-          if (clip?.isImage != true)
-            OutlinedButton(
-              onPressed: editable ? _setOut : null,
-              child: const Text('Set end'),
-            ),
-          OutlinedButton(
-            onPressed: editable ? _split : null,
-            child: const Text('Split here'),
-          ),
-          OutlinedButton(
-            onPressed: editable ? _remove : null,
-            child: const Text('Remove clip'),
+      ],
+    );
+  }
+
+  Widget _plannedPanel(String title, List<String> features) {
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      children: [
+        Row(children: [
+          Expanded(child: Text(title,
+              style: const TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.bold))),
+          const Chip(
+            visualDensity: VisualDensity.compact,
+            label: Text('Planned', style: TextStyle(fontSize: 11)),
           ),
         ]),
+        const SizedBox(height: 4),
+        const Text('This menu shows the tools we are developing. '
+            'They do not change the exported video yet.',
+            style: TextStyle(color: Colors.white70, fontSize: 12)),
+        const SizedBox(height: 10),
+        Wrap(spacing: 6, runSpacing: 6, children: [
+          for (final feature in features)
+            Chip(label: Text(feature)),
+        ]),
       ],
+    );
+  }
+
+  Widget _selectedToolPanel(EditorClip? clip) {
+    switch (_section) {
+      case 'Canvas':
+        return _canvasPanel(clip);
+      case 'Clips':
+        return _timelinePanel(clip);
+      case 'Beauty':
+        return _plannedPanel('Face & skin beauty', const [
+          'Smooth skin', 'Face shape', 'Jawline', 'Eyes', 'Nose',
+          'Skin tone', 'Teeth',
+        ]);
+      case 'Makeup':
+        return _plannedPanel('Makeup', const [
+          'Foundation', 'Lip color', 'Blush', 'Eyeshadow', 'Eyeliner',
+          'Eyebrows', 'Eyelashes', 'Save makeup style',
+        ]);
+      case 'Body':
+        return _plannedPanel('Body adjustments', const [
+          'Slim waist', 'Shape hips', 'Arms', 'Legs', 'Shoulders',
+          'Height', 'Motion tracking',
+        ]);
+      case 'Retouch':
+        return _plannedPanel('Tracked removal', const [
+          'Small blemishes', 'Scars', 'Tattoos', 'Large skin areas',
+          'Unwanted objects', 'Track mask through video',
+        ]);
+      case 'Audio':
+        return _plannedPanel('Audio', const [
+          'Volume', 'Mute', 'Music', 'Voiceover', 'Fade in / out',
+          'Noise removal',
+        ]);
+      case 'Effects':
+        return _plannedPanel('Effects & color', const [
+          'Filters', 'Brightness', 'Contrast', 'Transitions',
+          'Speed', 'Stabilization', 'Text & captions',
+        ]);
+      default:
+        return _editPanel(clip);
+    }
+  }
+
+  Widget _toolCategoryBar() {
+    const categories = <(String, IconData)>[
+      ('Edit', Icons.content_cut),
+      ('Canvas', Icons.crop_rotate),
+      ('Clips', Icons.view_timeline),
+      ('Beauty', Icons.face_retouching_natural),
+      ('Makeup', Icons.brush),
+      ('Body', Icons.accessibility_new),
+      ('Retouch', Icons.healing),
+      ('Audio', Icons.music_note),
+      ('Effects', Icons.auto_awesome),
+    ];
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      height: 70,
+      decoration: BoxDecoration(
+        color: colors.surfaceContainer,
+        border: Border(top: BorderSide(color: colors.outlineVariant)),
+      ),
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        children: [
+          for (final item in categories)
+            InkWell(
+              onTap: () => setState(() => _section = item.$1),
+              child: Container(
+                width: 74,
+                decoration: BoxDecoration(
+                  color: _section == item.$1
+                      ? colors.primaryContainer : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                margin: const EdgeInsets.symmetric(
+                    horizontal: 2, vertical: 4),
+                padding: const EdgeInsets.symmetric(vertical: 5),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(item.$2, size: 23,
+                        color: _section == item.$1
+                            ? colors.onPrimaryContainer : colors.onSurface),
+                    const SizedBox(height: 3),
+                    Text(item.$1, style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: _section == item.$1
+                            ? FontWeight.bold : FontWeight.normal,
+                        color: _section == item.$1
+                            ? colors.onPrimaryContainer : colors.onSurface)),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
@@ -1117,9 +1282,9 @@ class _EditorScreenState extends State<EditorScreen> {
                       title: Text(item.name,
                           maxLines: 1, overflow: TextOverflow.ellipsis),
                       subtitle: Text(_time(item.end - item.start) +
-                          ' • Tap to edit picture'),
+                          ' • Tap to edit this clip'),
                       onTap: _busy ? null : () {
-                        setState(() => _panel = 0);
+                        setState(() => _section = 'Edit');
                         unawaited(_open(item));
                       },
                       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -1175,25 +1340,8 @@ class _EditorScreenState extends State<EditorScreen> {
           _videoFrame(clip, player),
           _previewControls(),
           _clipStrip(),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Row(children: [
-              ChoiceChip(
-                label: const Text('Adjust picture'),
-                selected: _panel == 0,
-                onSelected: (_) => setState(() => _panel = 0),
-              ),
-              const SizedBox(width: 8),
-              ChoiceChip(
-                label: const Text('Reorder clips'),
-                selected: _panel == 1,
-                onSelected: (_) => setState(() => _panel = 1),
-              ),
-            ]),
-          ),
-          Expanded(child: _panel == 0
-              ? _adjustPanel(clip)
-              : _timelinePanel(clip)),
+          Expanded(child: _selectedToolPanel(clip)),
+          _toolCategoryBar(),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             child: Column(
