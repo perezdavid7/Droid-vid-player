@@ -2,6 +2,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_kit.dart';
@@ -22,7 +23,15 @@ class EditorClip {
       this.saturation = 1, this.clarity = 0, this.overlayPath,
       this.overlayWidth = 0, this.overlayHeight = 0,
       this.overlaySize = 0.35, this.overlayX = 0.5, this.overlayY = 0.5,
-      this.overlayOpacity = 1, this.reverse = false});
+      this.overlayOpacity = 1, this.reverse = false,
+      this.temperature = 0, this.tint = 0, this.red = 0,
+      this.green = 0, this.blue = 0, this.exposure = 0,
+      this.shadows = 0, this.midtones = 0, this.highlights = 0,
+      this.whites = 0, this.blacks = 0,
+      this.volume = 1, this.fadeInMs = 0, this.fadeOutMs = 0,
+      this.speedRamp = false, this.rampStart = 0.25,
+      this.rampEnd = 0.75, this.rampSlow = 0.2,
+      this.rampEase = 0.10});
   final int id;
   final String path;
   final String name;
@@ -49,6 +58,25 @@ class EditorClip {
   double overlayY;
   double overlayOpacity;
   bool reverse;
+  double temperature;
+  double tint;
+  double red;
+  double green;
+  double blue;
+  double exposure;
+  double shadows;
+  double midtones;
+  double highlights;
+  double whites;
+  double blacks;
+  double volume;
+  int fadeInMs;
+  int fadeOutMs;
+  bool speedRamp;
+  double rampStart;
+  double rampEnd;
+  double rampSlow;
+  double rampEase;
 
   EditorClip duplicate(int newId) =>
       EditorClip(newId, path, name, length, start, end,
@@ -59,7 +87,14 @@ class EditorClip {
           overlayPath: overlayPath, overlayWidth: overlayWidth,
           overlayHeight: overlayHeight, overlaySize: overlaySize,
           overlayX: overlayX, overlayY: overlayY,
-          overlayOpacity: overlayOpacity, reverse: reverse);
+          overlayOpacity: overlayOpacity, reverse: reverse,
+          temperature: temperature, tint: tint, red: red, green: green,
+          blue: blue, exposure: exposure, shadows: shadows,
+          midtones: midtones, highlights: highlights, whites: whites,
+          blacks: blacks, volume: volume, fadeInMs: fadeInMs,
+          fadeOutMs: fadeOutMs, speedRamp: speedRamp,
+          rampStart: rampStart, rampEnd: rampEnd,
+          rampSlow: rampSlow, rampEase: rampEase);
 
   Map<String, Object?> toJson() => {
     'id': id, 'path': path, 'name': name, 'length': length,
@@ -72,6 +107,13 @@ class EditorClip {
     'overlayHeight': overlayHeight, 'overlaySize': overlaySize,
     'overlayX': overlayX, 'overlayY': overlayY,
     'overlayOpacity': overlayOpacity, 'reverse': reverse,
+    'temperature': temperature, 'tint': tint, 'red': red,
+    'green': green, 'blue': blue, 'exposure': exposure,
+    'shadows': shadows, 'midtones': midtones, 'highlights': highlights,
+    'whites': whites, 'blacks': blacks, 'volume': volume,
+    'fadeInMs': fadeInMs, 'fadeOutMs': fadeOutMs,
+    'speedRamp': speedRamp, 'rampStart': rampStart,
+    'rampEnd': rampEnd, 'rampSlow': rampSlow, 'rampEase': rampEase,
   };
 
   factory EditorClip.fromJson(Map<String, dynamic> data) => EditorClip(
@@ -101,6 +143,25 @@ class EditorClip {
     overlayY: (data['overlayY'] as num?)?.toDouble() ?? 0.5,
     overlayOpacity: (data['overlayOpacity'] as num?)?.toDouble() ?? 1,
     reverse: data['reverse'] == true,
+    temperature: (data['temperature'] as num?)?.toDouble() ?? 0,
+    tint: (data['tint'] as num?)?.toDouble() ?? 0,
+    red: (data['red'] as num?)?.toDouble() ?? 0,
+    green: (data['green'] as num?)?.toDouble() ?? 0,
+    blue: (data['blue'] as num?)?.toDouble() ?? 0,
+    exposure: (data['exposure'] as num?)?.toDouble() ?? 0,
+    shadows: (data['shadows'] as num?)?.toDouble() ?? 0,
+    midtones: (data['midtones'] as num?)?.toDouble() ?? 0,
+    highlights: (data['highlights'] as num?)?.toDouble() ?? 0,
+    whites: (data['whites'] as num?)?.toDouble() ?? 0,
+    blacks: (data['blacks'] as num?)?.toDouble() ?? 0,
+    volume: (data['volume'] as num?)?.toDouble() ?? 1,
+    fadeInMs: (data['fadeInMs'] as num?)?.toInt() ?? 0,
+    fadeOutMs: (data['fadeOutMs'] as num?)?.toInt() ?? 0,
+    speedRamp: data['speedRamp'] == true,
+    rampStart: (data['rampStart'] as num?)?.toDouble() ?? 0.25,
+    rampEnd: (data['rampEnd'] as num?)?.toDouble() ?? 0.75,
+    rampSlow: (data['rampSlow'] as num?)?.toDouble() ?? 0.2,
+    rampEase: (data['rampEase'] as num?)?.toDouble() ?? 0.10,
   );
 }
 
@@ -152,6 +213,17 @@ class _EditorScreenState extends State<EditorScreen> {
   String? _error;
   String? _section;
   String? _tool;
+  String _rgbChannel = 'Red';
+  String _wbControl = 'Temperature';
+  String _rampControl = 'Start';
+  Map<String, double>? _copiedColor;
+  final Map<int, String> _waveformFiles = {};
+  bool _waveformGenerating = false;
+  bool _waveformAgain = false;
+  bool _snapAudio = true;
+  bool _audioHandleDragging = false;
+  double _lastAudioVolume = 1;
+  double _lastPreviewSpeed = 1;
   final ScrollController _timelineController = ScrollController();
   final Map<int, Offset> _timelineFingers = {};
   Timer? _timelineSeekTimer;
@@ -177,9 +249,85 @@ class _EditorScreenState extends State<EditorScreen> {
     return 'Droid Vid Editor';
   }
 
-  int _clipDuration(EditorClip clip) => clip.isImage
-      ? clip.end - clip.start
-      : ((clip.end - clip.start) / clip.speed).round();
+
+  List<EditorClip> _speedPieces(EditorClip clip) {
+    if (clip.isImage || !clip.speedRamp || clip.reverse ||
+        clip.end - clip.start < 1000) {
+      return [clip];
+    }
+    final first = clip.rampStart.clamp(0.0, 0.94);
+    final last = clip.rampEnd.clamp(first + 0.04, 1.0);
+    final ease = math.min(clip.rampEase.clamp(0.01, 0.20),
+        (last - first) * 0.45);
+    final marks = [
+      0.0, first, first + ease / 3, first + 2 * ease / 3,
+      first + ease, last - ease, last - 2 * ease / 3,
+      last - ease / 3, last, 1.0,
+    ];
+    final slow = clip.rampSlow.clamp(0.1, 1.0);
+    final speeds = [
+      1.0, 0.85, 0.55, 0.28 + slow * 0.72,
+      slow, 0.28 + slow * 0.72, 0.55, 0.85, 1.0,
+    ];
+    final span = clip.end - clip.start;
+    final pieces = <EditorClip>[];
+    for (var i = 0; i < speeds.length; i++) {
+      final from = clip.start + (marks[i] * span).round();
+      final to = clip.start + (marks[i + 1] * span).round();
+      if (to - from < 40) continue;
+      final part = clip.duplicate(clip.id);
+      part.start = from;
+      part.end = to;
+      part.speed = (clip.speed * speeds[i]).clamp(0.1, 3.0);
+      part.speedRamp = false;
+      part.fadeInMs = 0;
+      part.fadeOutMs = 0;
+      pieces.add(part);
+    }
+    return pieces.isEmpty ? [clip] : pieces;
+  }
+
+  int _clipDuration(EditorClip clip) {
+    if (clip.isImage) return clip.end - clip.start;
+    return _speedPieces(clip).fold<int>(0, (duration, part) =>
+        duration + ((part.end - part.start) / part.speed).round());
+  }
+
+  int _outputAtSource(EditorClip clip, int position) {
+    var output = 0;
+    for (final part in _speedPieces(clip)) {
+      if (position <= part.start) break;
+      final source = (position - part.start)
+          .clamp(0, part.end - part.start);
+      output += (source / (part.isImage ? 1 : part.speed)).round();
+      if (position < part.end) break;
+    }
+    return output;
+  }
+
+  int _sourceAtOutput(EditorClip clip, int outputMs) {
+    var remaining = outputMs.clamp(0, _clipDuration(clip));
+    for (final part in _speedPieces(clip)) {
+      final length = part.isImage
+          ? part.end - part.start
+          : ((part.end - part.start) / part.speed).round();
+      if (remaining < length) {
+        return (part.start +
+            remaining * (part.isImage ? 1 : part.speed))
+            .round().clamp(part.start, part.end);
+      }
+      remaining -= length;
+    }
+    return clip.end;
+  }
+
+  double _speedAtSource(EditorClip clip, int position) {
+    for (final part in _speedPieces(clip)) {
+      if (position < part.end) return part.speed;
+    }
+    return clip.speed;
+  }
+
 
   int get _timelineLength =>
       _clips.fold<int>(0, (sum, c) => sum + _clipDuration(c));
@@ -197,8 +345,7 @@ class _EditorScreenState extends State<EditorScreen> {
     final clip = _active;
     if (clip == null) return 0;
     return _clipOffset(clip) +
-        ((_at - clip.start) / clip.speed)
-            .round().clamp(0, _clipDuration(clip));
+        _outputAtSource(clip, _at).clamp(0, _clipDuration(clip));
   }
 
   String _timeExact(int milliseconds) {
@@ -291,6 +438,7 @@ class _EditorScreenState extends State<EditorScreen> {
       _transitionSeconds = 0.5;
       _section = null;
       _tool = null;
+      _waveformFiles.clear();
       _error = null;
     });
   }
@@ -342,6 +490,7 @@ class _EditorScreenState extends State<EditorScreen> {
     });
     await _writeProjectIndex();
     if (_clips.isNotEmpty) await _open(_clips.first);
+    unawaited(_queueWaveforms());
   }
 
   Future<void> _load() async {
@@ -582,7 +731,10 @@ class _EditorScreenState extends State<EditorScreen> {
         return;
       }
       await next.seekTo(Duration(milliseconds: target));
-      await next.setPlaybackSpeed(clip.speed);
+      _lastPreviewSpeed = _speedAtSource(clip, target);
+      await next.setPlaybackSpeed(_lastPreviewSpeed);
+      _lastAudioVolume = _clipAudioVolume(clip, target);
+      await next.setVolume(_lastAudioVolume);
       next.addListener(_watch);
       setState(() => _player = next);
       if (autoplay) {
@@ -640,6 +792,16 @@ class _EditorScreenState extends State<EditorScreen> {
     if (current >= clip.end && player.value.isPlaying) {
       unawaited(player.pause());
     }
+    final desiredSpeed = _speedAtSource(clip, current);
+    if ((desiredSpeed - _lastPreviewSpeed).abs() > 0.03) {
+      _lastPreviewSpeed = desiredSpeed;
+      unawaited(player.setPlaybackSpeed(desiredSpeed));
+    }
+    final currentVolume = _clipAudioVolume(clip, current);
+    if ((currentVolume - _lastAudioVolume).abs() > 0.02) {
+      _lastAudioVolume = currentVolume;
+      unawaited(player.setVolume(currentVolume));
+    }
     if ((current - _at).abs() >= 80) {
       setState(() => _at = current.clamp(clip.start, clip.end));
       _centerTimelineOn(_timelineAt);
@@ -694,8 +856,8 @@ class _EditorScreenState extends State<EditorScreen> {
       final clip = _clips[i];
       final duration = _clipDuration(clip);
       if (remaining < duration || i == _clips.length - 1) {
-        final sourcePosition = clip.start +
-            (remaining.clamp(0, duration) * clip.speed).round();
+        final sourcePosition =
+            _sourceAtOutput(clip, remaining.clamp(0, duration));
         if (clip.id == _activeId &&
             (clip.isImage || _player != null)) {
           if (clip.isImage) {
@@ -815,6 +977,7 @@ class _EditorScreenState extends State<EditorScreen> {
     if (mounted && _active == null && _clips.isNotEmpty) {
       await _open(_clips.first);
     }
+    unawaited(_queueWaveforms());
   }
 
   Future<void> _addPhotoOverlay() async {
@@ -888,6 +1051,12 @@ class _EditorScreenState extends State<EditorScreen> {
   void _toggleReverse() {
     final clip = _active;
     if (clip == null || clip.isImage || _busy) return;
+    if (!clip.reverse && clip.speedRamp) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Turn off Speed Ramp before enabling Reverse.'),
+      ));
+      return;
+    }
     if (!clip.reverse && clip.end - clip.start > 10000) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
         content: Text('Reverse currently supports clips up to 10 seconds. '
@@ -903,7 +1072,10 @@ class _EditorScreenState extends State<EditorScreen> {
     if (clip == null || clip.isImage || _busy) return;
     setState(() => clip.speed = speed);
     final player = _player;
-    if (player != null) unawaited(player.setPlaybackSpeed(speed));
+    if (player != null) {
+      _lastPreviewSpeed = _speedAtSource(clip, _at);
+      unawaited(player.setPlaybackSpeed(_lastPreviewSpeed));
+    }
   }
 
   void _change(void Function(EditorClip) update) {
@@ -917,12 +1089,14 @@ class _EditorScreenState extends State<EditorScreen> {
     final clip = _active;
     if (clip == null || _at >= clip.end - 300) return;
     _change((c) => c.start = _at);
+    _refreshWaveforms();
   }
 
   void _setOut() {
     final clip = _active;
     if (clip == null || _at <= clip.start + 300) { return; }
     _change((c) => c.end = _at);
+    _refreshWaveforms();
   }
 
   void _split() {
@@ -939,6 +1113,7 @@ class _EditorScreenState extends State<EditorScreen> {
       _message = 'Split complete. Both pieces are retained.';
     });
     unawaited(_save());
+    _refreshWaveforms();
   }
 
   void _duplicate() {
@@ -994,6 +1169,103 @@ class _EditorScreenState extends State<EditorScreen> {
     } finally {
       _sessionId = null;
     }
+  }
+
+
+  Future<void> _queueWaveforms() async {
+    if (_waveformGenerating) {
+      _waveformAgain = true;
+      return;
+    }
+    _waveformGenerating = true;
+    try {
+      do {
+        _waveformAgain = false;
+        final project = _projectId;
+        for (final clip in List<EditorClip>.of(_clips)) {
+          if (!mounted || _busy || _projectId != project) break;
+          if (clip.isImage || _waveformFiles.containsKey(clip.id)) continue;
+          if (!await _hasAudio(clip.path)) continue;
+          final folder = Directory(p.join((await _root()).path,
+              'waveforms', project ?? 'default'));
+          await folder.create(recursive: true);
+          final file = File(p.join(folder.path,
+              '${clip.id}_${clip.start}_${clip.end}.png'));
+          if (!await file.exists()) {
+            final complete = Completer<bool>();
+            try {
+              await FFmpegKit.executeWithArgumentsAsync([
+                '-hide_banner', '-nostdin', '-loglevel', 'error',
+                '-ss', (clip.start / 1000).toStringAsFixed(3),
+                '-t', ((clip.end - clip.start) / 1000).toStringAsFixed(3),
+                '-i', clip.path,
+                '-filter_complex',
+                '[0:a:0]aformat=channel_layouts=mono,'
+                    'showwavespic=s=1200x64:colors=white[wave]',
+                '-map', '[wave]', '-frames:v', '1', '-y', file.path,
+              ], (finished) async {
+                final code = await finished.getReturnCode();
+                if (!complete.isCompleted) {
+                  complete.complete(ReturnCode.isSuccess(code));
+                }
+              });
+              await complete.future.timeout(const Duration(seconds: 40));
+            } catch (_) {
+              // Waveform generation is optional: editing must still work.
+            }
+          }
+          if (mounted && project == _projectId &&
+              await file.exists() && await file.length() > 100) {
+            setState(() => _waveformFiles[clip.id] = file.path);
+          }
+        }
+      } while (_waveformAgain && mounted && !_busy);
+    } finally {
+      _waveformGenerating = false;
+    }
+  }
+
+  void _refreshWaveforms() {
+    _waveformFiles.clear();
+    unawaited(_queueWaveforms());
+  }
+
+  double _clipAudioVolume(EditorClip clip, int position) {
+    final ms = (position - clip.start).clamp(0, clip.end - clip.start);
+    final out = _outputAtSource(clip, clip.start + ms);
+    final duration = _clipDuration(clip).toDouble();
+    var multiplier = 1.0;
+    if (clip.fadeInMs > 0) {
+      multiplier = math.min(multiplier, out / clip.fadeInMs);
+    }
+    if (clip.fadeOutMs > 0) {
+      multiplier = math.min(multiplier,
+          (duration - out) / clip.fadeOutMs);
+    }
+    return (clip.volume * multiplier).clamp(0.0, 2.0).toDouble();
+  }
+
+  String _audioFilters(EditorClip clip) {
+    final filters = <String>[];
+    if (clip.reverse && !clip.isImage) filters.add('areverse');
+    if (clip.speed != 1 && !clip.isImage) {
+      filters.add(_audioTempo(clip.speed));
+    }
+    if (clip.volume != 1) {
+      filters.add('volume=${clip.volume.toStringAsFixed(3)}');
+    }
+    final duration = _clipDuration(clip) / 1000;
+    if (clip.fadeInMs > 0) {
+      final seconds = (clip.fadeInMs / 1000).clamp(0.0, duration);
+      filters.add('afade=t=in:st=0:d=${seconds.toStringAsFixed(3)}');
+    }
+    if (clip.fadeOutMs > 0) {
+      final seconds = (clip.fadeOutMs / 1000).clamp(0.0, duration);
+      final from = (duration - seconds).clamp(0.0, duration);
+      filters.add('afade=t=out:st=${from.toStringAsFixed(3)}'
+          ':d=${seconds.toStringAsFixed(3)}');
+    }
+    return filters.join(',');
   }
 
   Future<bool> _hasAudio(String path) async {
@@ -1118,13 +1390,19 @@ class _EditorScreenState extends State<EditorScreen> {
       final partDurations = <double>[];
       for (var i = 0; i < _clips.length; i++) {
         if (_cancelled) throw StateError('Export cancelled');
-        final clip = _clips[i];
+        final sourceClip = _clips[i];
+        final renderPieces = _speedPieces(sourceClip);
+        final renderedPieces = <String>[];
         if (mounted) {
           setState(() => _message =
               'Rendering clip ' + (i + 1).toString() +
               ' of ' + _clips.length.toString() + '…');
         }
-        final filters = <String>[
+        for (var pieceIndex = 0;
+            pieceIndex < renderPieces.length; pieceIndex++) {
+          if (_cancelled) throw StateError('Export cancelled');
+          final clip = renderPieces[pieceIndex];
+          final filters = <String>[
           if (!clip.isImage)
             'setpts=(PTS-STARTPTS)/' + clip.speed.toStringAsFixed(3),
           ...List.filled(clip.turns % 4, 'transpose=1'),
@@ -1137,17 +1415,14 @@ class _EditorScreenState extends State<EditorScreen> {
           'crop=' + size[0].toString() + ':' + size[1].toString(),
           if (clip.reverse && !clip.isImage)
             'reverse,setpts=PTS-STARTPTS',
-          if (clip.brightness != 0 || clip.contrast != 1 ||
-              clip.saturation != 1)
-            'eq=brightness=' + clip.brightness.toStringAsFixed(3) +
-                ':contrast=' + clip.contrast.toStringAsFixed(3) +
-                ':saturation=' + clip.saturation.toStringAsFixed(3),
+          ..._colorFilters(clip),
           if (clip.clarity > 0.001)
             'unsharp=5:5:' + clip.clarity.toStringAsFixed(3),
           'setsar=1',
         ].join(',');
-        final output = p.join(work.path,
-            stamp + '_clip_' + i.toString() + '.mp4');
+          final output = p.join(work.path,
+              stamp + '_clip_' + i.toString() +
+              '_part_' + pieceIndex.toString() + '.mp4');
         final audio = clip.isImage ? false : await _hasAudio(clip.path);
         final hasOverlay = clip.overlayPath != null &&
             await File(clip.overlayPath!).exists();
@@ -1186,12 +1461,8 @@ class _EditorScreenState extends State<EditorScreen> {
             '-vf', filters,
           ],
           '-map', audio ? '0:a:0' : '1:a:0',
-          if (audio && !clip.isImage &&
-              (clip.speed != 1 || clip.reverse))
-            ...['-af', [
-              if (clip.reverse) 'areverse',
-              if (clip.speed != 1) _audioTempo(clip.speed),
-            ].join(',')],
+          if (_audioFilters(clip).isNotEmpty)
+            ...['-af', _audioFilters(clip)],
           '-r', '30', '-fps_mode', 'cfr',
           '-c:v', 'mpeg4', '-q:v', '2', '-threads:v', '2',
           '-pix_fmt', 'yuv420p',
@@ -1202,12 +1473,58 @@ class _EditorScreenState extends State<EditorScreen> {
         if (!await _run(arguments) || !await File(output).exists()) {
           throw StateError('Could not encode clip ' + (i + 1).toString());
         }
-        parts.add(output);
-        final encoded = await FFprobeKit.getMediaInformation(output);
+          renderedPieces.add(output);
+        }
+        var rendered = renderedPieces.first;
+        if (renderedPieces.length > 1) {
+          final localList = File(p.join(work.path,
+              stamp + '_parts_' + i.toString() + '.concat.txt'));
+          await localList.writeAsString(
+              renderedPieces.map((part) => "file '" + part + "'")
+                  .join('\n') + '\n', flush: true);
+          rendered = p.join(work.path,
+              stamp + '_joined_' + i.toString() + '.mp4');
+          if (!await _run([
+            '-hide_banner', '-nostdin', '-loglevel', 'error',
+            '-f', 'concat', '-safe', '0', '-i', localList.path,
+            '-c', 'copy', '-y', rendered,
+          ])) {
+            throw StateError('Could not join speed ramp segments');
+          }
+          if (sourceClip.fadeInMs > 0 || sourceClip.fadeOutMs > 0) {
+            final fadeFilters = <String>[];
+            final length = _clipDuration(sourceClip) / 1000;
+            if (sourceClip.fadeInMs > 0) {
+              final seconds = (sourceClip.fadeInMs / 1000)
+                  .clamp(0.0, length);
+              fadeFilters.add('afade=t=in:st=0:d=${seconds.toStringAsFixed(3)}');
+            }
+            if (sourceClip.fadeOutMs > 0) {
+              final seconds = (sourceClip.fadeOutMs / 1000)
+                  .clamp(0.0, length);
+              final at = (length - seconds).clamp(0.0, length);
+              fadeFilters.add('afade=t=out:st=${at.toStringAsFixed(3)}'
+                  ':d=${seconds.toStringAsFixed(3)}');
+            }
+            final faded = p.join(work.path,
+                stamp + '_ramp_fades_' + i.toString() + '.mp4');
+            if (!await _run([
+              '-hide_banner', '-nostdin', '-loglevel', 'error',
+              '-i', rendered, '-map', '0:v:0', '-map', '0:a:0',
+              '-c:v', 'copy', '-af', fadeFilters.join(','),
+              '-c:a', 'aac', '-b:a', '160k', '-y', faded,
+            ])) {
+              throw StateError('Could not apply speed ramp audio fades');
+            }
+            rendered = faded;
+          }
+        }
+        parts.add(rendered);
+        final encoded = await FFprobeKit.getMediaInformation(rendered);
         final actualDuration = double.tryParse(
             encoded.getMediaInformation()?.getDuration() ?? '');
         partDurations.add(actualDuration != null && actualDuration > 0
-            ? actualDuration : _clipDuration(clip) / 1000);
+            ? actualDuration : _clipDuration(sourceClip) / 1000);
       }
       if (_cancelled) throw StateError('Export cancelled');
       final partial = File(p.join(exports.path,
@@ -1333,22 +1650,84 @@ class _EditorScreenState extends State<EditorScreen> {
     });
   }
 
+
+  // Keep simple color changes visible in the player. Tonal bands are
+  // approximated in this preview; export uses a proper tonal curve.
   List<double> _colorMatrix(EditorClip clip) {
     final saturation = clip.saturation;
     final contrast = clip.contrast;
     final red = 0.2126 * (1 - saturation);
     final green = 0.7152 * (1 - saturation);
     final blue = 0.0722 * (1 - saturation);
-    final offset = (1 - contrast) * 128 + clip.brightness * 255;
+    final exposure = math.pow(2.0, clip.exposure * 0.5).toDouble();
+    final rGain = (1 + clip.temperature * 0.22 +
+        clip.tint * 0.04 + clip.red * 0.28).clamp(0.4, 1.6);
+    final gGain = (1 - clip.tint * 0.22 +
+        clip.green * 0.28).clamp(0.4, 1.6);
+    final bGain = (1 - clip.temperature * 0.22 +
+        clip.tint * 0.04 + clip.blue * 0.28).clamp(0.4, 1.6);
+    final toneOffset = (clip.shadows * 0.07 + clip.midtones * 0.09 +
+        clip.highlights * 0.04 + clip.whites * 0.025 +
+        clip.blacks * 0.035) * 255;
+    final offset = (1 - contrast) * 128 +
+        clip.brightness * 255 + toneOffset;
     return [
-      contrast * (red + saturation), contrast * green,
-      contrast * blue, 0, offset,
-      contrast * red, contrast * (green + saturation),
-      contrast * blue, 0, offset,
-      contrast * red, contrast * green,
-      contrast * (blue + saturation), 0, offset,
+      exposure * rGain * contrast * (red + saturation),
+      exposure * rGain * contrast * green,
+      exposure * rGain * contrast * blue, 0, rGain * offset,
+      exposure * gGain * contrast * red,
+      exposure * gGain * contrast * (green + saturation),
+      exposure * gGain * contrast * blue, 0, gGain * offset,
+      exposure * bGain * contrast * red,
+      exposure * bGain * contrast * green,
+      exposure * bGain * contrast * (blue + saturation),
+      0, bGain * offset,
       0, 0, 0, 1, 0,
     ];
+  }
+
+  String? _toneCurve(EditorClip clip) {
+    if (clip.shadows == 0 && clip.midtones == 0 &&
+        clip.highlights == 0 && clip.whites == 0 && clip.blacks == 0) {
+      return null;
+    }
+    final b = (clip.blacks * 0.08).clamp(0.0, 0.14);
+    final s = (0.25 + clip.shadows * 0.12).clamp(b + 0.02, 0.43);
+    final m = (0.5 + clip.midtones * 0.13).clamp(s + 0.02, 0.69);
+    final h = (0.75 + clip.highlights * 0.12).clamp(m + 0.02, 0.91);
+    final w = (1 + clip.whites * 0.08).clamp(h + 0.02, 1.0);
+    return "curves=all='0/${b.toStringAsFixed(3)} "
+        "0.25/${s.toStringAsFixed(3)} "
+        "0.5/${m.toStringAsFixed(3)} "
+        "0.75/${h.toStringAsFixed(3)} "
+        "1/${w.toStringAsFixed(3)}'";
+  }
+
+  List<String> _colorFilters(EditorClip clip) {
+    final filters = <String>[];
+    final brightness = (clip.brightness + clip.exposure * 0.12)
+        .clamp(-0.8, 0.8);
+    if (brightness != 0 || clip.contrast != 1 ||
+        clip.saturation != 1 || clip.exposure != 0) {
+      filters.add('eq=brightness=${brightness.toStringAsFixed(3)}'
+          ':contrast=${clip.contrast.toStringAsFixed(3)}'
+          ':saturation=${clip.saturation.toStringAsFixed(3)}'
+          ':gamma=${math.pow(2.0, clip.exposure * 0.28).toStringAsFixed(3)}');
+    }
+    final red = (1 + clip.temperature * 0.22 + clip.tint * 0.04 +
+        clip.red * 0.28).clamp(0.4, 1.6);
+    final green = (1 - clip.tint * 0.22 + clip.green * 0.28)
+        .clamp(0.4, 1.6);
+    final blue = (1 - clip.temperature * 0.22 + clip.tint * 0.04 +
+        clip.blue * 0.28).clamp(0.4, 1.6);
+    if (red != 1 || green != 1 || blue != 1) {
+      filters.add('colorchannelmixer=rr=${red.toStringAsFixed(3)}'
+          ':gg=${green.toStringAsFixed(3)}'
+          ':bb=${blue.toStringAsFixed(3)}');
+    }
+    final curve = _toneCurve(clip);
+    if (curve != null) filters.add(curve);
+    return filters;
   }
 
   Widget _videoFrame(EditorClip? clip, VideoPlayerController? player,
@@ -1611,7 +1990,8 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
   bool _handleTimelineScroll(ScrollNotification notification) {
-    if (_timelinePinching || _busy || _clips.isEmpty) return false;
+    if (_timelinePinching || _audioHandleDragging ||
+        _busy || _clips.isEmpty) return false;
     if (notification is ScrollStartNotification &&
         notification.dragDetails != null) {
       _pausePreview();
@@ -1636,6 +2016,133 @@ class _EditorScreenState extends State<EditorScreen> {
       }));
     }
     return false;
+  }
+
+
+  int _snapFadeMs(EditorClip clip, int proposed, bool incoming) {
+    final length = _clipDuration(clip);
+    final threshold = (12 / _pixelsPerSecond * 1000).round();
+    var target = proposed.clamp(0, length);
+    if (!_snapAudio) return target;
+    if (target < threshold) return 0;
+    if (length - target < threshold) return length;
+    final playheadInClip = (_scrubMs ?? _timelineAt) - _clipOffset(clip);
+    final matching = incoming ? playheadInClip : length - playheadInClip;
+    if (matching >= 0 && matching <= length &&
+        (target - matching).abs() < threshold) {
+      target = matching;
+    }
+    return target;
+  }
+
+
+  Widget _rampHandle(EditorClip clip, double width, bool start) {
+    final span = clip.end - clip.start;
+    final fraction = start ? clip.rampStart : clip.rampEnd;
+    final marker = clip.start + (fraction * span).round();
+    final distance = _outputAtSource(clip, marker) / 1000 * _pixelsPerSecond;
+    return Positioned(
+      left: (distance - 10).clamp(0.0, math.max(0.0, width - 20)),
+      top: 2,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragStart: (_) {
+          _pausePreview();
+          _audioHandleDragging = true;
+        },
+        onHorizontalDragUpdate: _busy ? null : (details) {
+          final outputPosition = _outputAtSource(clip, marker) +
+              (details.delta.dx / _pixelsPerSecond * 1000).round();
+          var sourcePosition = _sourceAtOutput(clip, outputPosition);
+          if (_snapAudio) {
+            final playhead = _scrubMs ?? _timelineAt;
+            final snapThreshold = (12 / _pixelsPerSecond * 1000).round();
+            if ((playhead - (_clipOffset(clip) + outputPosition)).abs() <
+                snapThreshold) {
+              sourcePosition = _sourceAtOutput(clip,
+                  playhead - _clipOffset(clip));
+            }
+          }
+          final next = ((sourcePosition - clip.start) / span)
+              .clamp(0.0, 1.0).toDouble();
+          setState(() {
+            if (start) {
+              clip.rampStart = next.clamp(0.0, clip.rampEnd - 0.04);
+            } else {
+              clip.rampEnd = next.clamp(clip.rampStart + 0.04, 1.0);
+            }
+          });
+        },
+        onHorizontalDragEnd: (_) {
+          _audioHandleDragging = false;
+          unawaited(_save());
+        },
+        child: Container(
+          width: 20, height: 22,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: Colors.lightBlueAccent,
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(color: Colors.black87),
+          ),
+          child: Text(start ? 'S' : 'E',
+            style: const TextStyle(
+              color: Colors.black,
+              fontSize: 11, fontWeight: FontWeight.bold)),
+        ),
+      ),
+    );
+  }
+
+  Widget _audioFadeHandle(EditorClip clip, double width, bool incoming) {
+    final fade = incoming ? clip.fadeInMs : clip.fadeOutMs;
+    final distance = fade / 1000 * _pixelsPerSecond;
+    final x = incoming ? distance : width - distance;
+    return Positioned(
+      left: (x - 12).clamp(0.0, math.max(0.0, width - 24)),
+      bottom: 3,
+      child: Tooltip(
+        message: incoming ? 'Drag right to fade in'
+            : 'Drag left to fade out',
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragStart: (_) {
+            _pausePreview();
+            _audioHandleDragging = true;
+          },
+          onHorizontalDragUpdate: _busy ? null : (details) {
+            final step = (details.delta.dx / _pixelsPerSecond * 1000).round();
+            setState(() {
+              final proposed = incoming
+                  ? clip.fadeInMs + step : clip.fadeOutMs - step;
+              final updated = _snapFadeMs(clip, proposed, incoming);
+              if (incoming) {
+                clip.fadeInMs = updated;
+              } else {
+                clip.fadeOutMs = updated;
+              }
+            });
+          },
+          onHorizontalDragEnd: (_) {
+            _audioHandleDragging = false;
+            unawaited(_save());
+          },
+          child: Container(
+            width: 24, height: 28,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.amberAccent,
+              borderRadius: BorderRadius.circular(5),
+              border: Border.all(color: Colors.black87),
+            ),
+            child: Text(incoming ? 'IN' : 'OUT',
+              style: const TextStyle(
+                fontSize: 9, color: Colors.black,
+                fontWeight: FontWeight.bold)),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _clipStrip() {
@@ -1741,29 +2248,55 @@ class _EditorScreenState extends State<EditorScreen> {
                           ),
                           borderRadius: BorderRadius.circular(3),
                         ),
-                        child: width < 48
-                          ? null
-                          : Padding(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 5, vertical: 2),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text('$index. ${item.isImage ? 'Photo: ' : ''}${item.name}',
-                                    maxLines: 1, overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(fontSize: 10,
-                                        color: selected
-                                            ? colors.onPrimaryContainer
-                                            : colors.onSurface)),
-                                  const Spacer(),
-                                  Text(_time(duration),
-                                    style: TextStyle(fontSize: 10,
-                                        color: selected
-                                            ? colors.onPrimaryContainer
-                                            : colors.onSurfaceVariant)),
-                                ],
+
+                        child: width < 48 ? null : Stack(children: [
+                          if (!item.isImage &&
+                              _waveformFiles[item.id] != null)
+                            Positioned.fill(child: Opacity(
+                              opacity: 0.6,
+                              child: Image.file(
+                                File(_waveformFiles[item.id]!),
+                                fit: BoxFit.fill,
+                                errorBuilder: (context, error, stack) =>
+                                    const SizedBox.shrink(),
                               ),
+                            )),
+                          Positioned.fill(child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 5, vertical: 2),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('$index. ${item.isImage ? 'Photo: ' : ''}${item.name}',
+                                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(fontSize: 10,
+                                    shadows: const [
+                                      Shadow(color: Colors.black, blurRadius: 4),
+                                    ],
+                                    color: selected
+                                        ? colors.onPrimaryContainer
+                                        : colors.onSurface)),
+                                const Spacer(),
+                                Text(_time(duration),
+                                  style: TextStyle(fontSize: 10,
+                                    shadows: const [
+                                      Shadow(color: Colors.black, blurRadius: 4),
+                                    ],
+                                    color: selected
+                                        ? colors.onPrimaryContainer
+                                        : colors.onSurfaceVariant)),
+                              ],
                             ),
+                          )),
+                          if (!item.isImage && width >= 90)
+                            _audioFadeHandle(item, width, true),
+                          if (!item.isImage && width >= 90)
+                            _audioFadeHandle(item, width, false),
+                          if (!item.isImage && item.speedRamp && width >= 110)
+                            _rampHandle(item, width, true),
+                          if (!item.isImage && item.speedRamp && width >= 110)
+                            _rampHandle(item, width, false),
+                        ]),
                       ),
                     );
                   },
@@ -1815,6 +2348,7 @@ class _EditorScreenState extends State<EditorScreen> {
           ('Duplicate', Icons.copy_outlined),
           ('Delete', Icons.delete_outline),
           ('Speed', Icons.speed),
+          ('Speed Ramp', Icons.trending_down),
           ('Reverse', Icons.flip_camera_android_outlined),
           ('Photo duration', Icons.photo_size_select_large),
         ];
@@ -1827,9 +2361,19 @@ class _EditorScreenState extends State<EditorScreen> {
       case 'Adjust':
         return const [
           ('Brightness', Icons.brightness_6),
+          ('Exposure', Icons.exposure),
           ('Contrast', Icons.contrast),
           ('Saturation', Icons.palette_outlined),
+          ('White Balance', Icons.wb_sunny_outlined),
+          ('RGB', Icons.color_lens_outlined),
+          ('Shadows', Icons.dark_mode_outlined),
+          ('Midtones', Icons.gradient),
+          ('Highlights', Icons.light_mode_outlined),
+          ('Whites', Icons.brightness_high),
+          ('Blacks', Icons.brightness_low),
           ('Clarity', Icons.auto_fix_high),
+          ('Copy color', Icons.copy_outlined),
+          ('Paste color', Icons.paste_outlined),
           ('Reset all', Icons.restart_alt),
         ];
       case 'Layers':
@@ -1876,9 +2420,12 @@ class _EditorScreenState extends State<EditorScreen> {
         ];
       case 'Audio':
         return const [
-          ('Volume', Icons.volume_up), ('Mute', Icons.volume_off),
+          ('Volume', Icons.volume_up), ('Fade in', Icons.trending_up),
+          ('Fade out', Icons.trending_down),
+          ('Snapping', Icons.grid_on),
+          ('Waveform', Icons.graphic_eq),
           ('Music', Icons.music_note), ('Voiceover', Icons.mic),
-          ('Audio fade', Icons.graphic_eq),
+          ('Keyframes', Icons.timeline),
         ];
       default:
         return const [
@@ -2003,6 +2550,40 @@ class _EditorScreenState extends State<EditorScreen> {
     unawaited(_save());
   }
 
+
+  Map<String, double> _colorSnapshot(EditorClip clip) => {
+    'brightness': clip.brightness, 'exposure': clip.exposure,
+    'contrast': clip.contrast, 'saturation': clip.saturation,
+    'temperature': clip.temperature, 'tint': clip.tint,
+    'red': clip.red, 'green': clip.green, 'blue': clip.blue,
+    'shadows': clip.shadows, 'midtones': clip.midtones,
+    'highlights': clip.highlights, 'whites': clip.whites,
+    'blacks': clip.blacks, 'clarity': clip.clarity,
+  };
+
+  void _pasteColor(EditorClip target) {
+    final saved = _copiedColor;
+    if (saved == null) return;
+    _change((c) {
+      c.brightness = saved['brightness']!;
+      c.exposure = saved['exposure']!;
+      c.contrast = saved['contrast']!;
+      c.saturation = saved['saturation']!;
+      c.temperature = saved['temperature']!;
+      c.tint = saved['tint']!;
+      c.red = saved['red']!;
+      c.green = saved['green']!;
+      c.blue = saved['blue']!;
+      c.shadows = saved['shadows']!;
+      c.midtones = saved['midtones']!;
+      c.highlights = saved['highlights']!;
+      c.whites = saved['whites']!;
+      c.blacks = saved['blacks']!;
+      c.clarity = saved['clarity']!;
+    });
+    setState(() => _message = 'Color settings pasted on this clip.');
+  }
+
   Widget _selectedControl(EditorClip? clip) {
     final section = _section;
     final tool = _tool;
@@ -2028,6 +2609,56 @@ class _EditorScreenState extends State<EditorScreen> {
           description: 'Export-only: transitions do not preview yet.');
     }
 
+    if (section == 'Audio') {
+      if (tool == 'Snapping') {
+        return _actionControl(
+          _snapAudio
+              ? 'Fade handles snap to the playhead and clip boundaries.'
+              : 'Move fade handles freely without snapping.',
+          _snapAudio ? 'Snapping ON' : 'Snapping OFF',
+          Icons.grid_on, () => setState(() => _snapAudio = !_snapAudio),
+        );
+      }
+      if (tool == 'Waveform') {
+        return _actionControl(
+          'Waveforms appear beneath video clips. '
+          'Pinch the timeline and drag the IN / OUT fade handles.',
+          'Refresh', Icons.refresh, _refreshWaveforms,
+        );
+      }
+      if (clip == null || clip.isImage) {
+        return const Center(child: Text(
+          'Select a video clip with audio first.'));
+      }
+      switch (tool) {
+        case 'Volume':
+          return _sliderControl('Original audio', clip.volume, 0, 2,
+              (v) {
+                setState(() => clip.volume = v);
+                final player = _player;
+                if (player != null) {
+                  unawaited(player.setVolume(
+                      _clipAudioVolume(clip, _at)));
+                }
+              },
+              description: '0 = mute • 1 = normal • 2 = amplified');
+        case 'Fade in':
+          final maxSeconds = math.min(10.0, _clipDuration(clip) / 1000);
+          return _sliderControl('Fade in (seconds)',
+              clip.fadeInMs / 1000, 0, math.max(0.1, maxSeconds),
+              (v) => setState(() => clip.fadeInMs =
+                  _snapFadeMs(clip, (v * 1000).round(), true)),
+              description: 'Or drag the IN handle on the audio waveform.');
+        case 'Fade out':
+          final maxSeconds = math.min(10.0, _clipDuration(clip) / 1000);
+          return _sliderControl('Fade out (seconds)',
+              clip.fadeOutMs / 1000, 0, math.max(0.1, maxSeconds),
+              (v) => setState(() => clip.fadeOutMs =
+                  _snapFadeMs(clip, (v * 1000).round(), false)),
+              description: 'Or drag the OUT handle on the audio waveform.');
+      }
+    }
+
     if (section == 'Clips') {
       if (tool == 'Previous clip') {
         return _actionControl('Jump to the previous clip.',
@@ -2044,8 +2675,10 @@ class _EditorScreenState extends State<EditorScreen> {
           () => _moveClip(earlier ? -1 : 1));
     }
 
-    if (const ['Beauty', 'Makeup', 'Body', 'Retouch', 'Audio', 'Effects']
-        .contains(section)) {
+    if (const ['Beauty', 'Makeup', 'Body', 'Retouch', 'Effects']
+        .contains(section) ||
+        (section == 'Audio' &&
+            const ['Music', 'Voiceover', 'Keyframes'].contains(tool))) {
       return const Center(child: Text(
         'Planned feature. This tool does not change the video yet.',
         textAlign: TextAlign.center,
@@ -2110,6 +2743,60 @@ class _EditorScreenState extends State<EditorScreen> {
                 child: const Text('Normal 1×')),
             ]),
           ]);
+        case 'Speed Ramp':
+          if (clip.isImage) {
+            return const Center(child: Text('Speed Ramp works on videos only.'));
+          }
+          if (clip.reverse) {
+            return const Center(child: Text(
+              'Turn off Reverse before using Speed Ramp.'));
+          }
+          return Column(children: [
+            SizedBox(height: 34, child: ListView(
+              scrollDirection: Axis.horizontal,
+              children: [
+                ChoiceChip(
+                  visualDensity: VisualDensity.compact,
+                  label: Text(clip.speedRamp ? 'Ramp ON' : 'Enable ramp'),
+                  selected: clip.speedRamp,
+                  onSelected: _busy ? null : (_) {
+                    _change((c) => c.speedRamp = !c.speedRamp);
+                    _centerTimelineOn(_timelineAt);
+                  },
+                ),
+                const SizedBox(width: 6),
+                for (final name in const ['Start', 'End', 'Slow', 'Blend'])
+                  Padding(
+                    padding: const EdgeInsets.only(right: 5),
+                    child: ChoiceChip(
+                      visualDensity: VisualDensity.compact,
+                      label: Text(name),
+                      selected: _rampControl == name,
+                      onSelected: (_) =>
+                          setState(() => _rampControl = name),
+                    ),
+                  ),
+              ],
+            )),
+            Expanded(child: clip.speedRamp
+              ? switch (_rampControl) {
+                'Start' => _sliderControl('Start point',
+                  clip.rampStart, 0, math.max(0.01, clip.rampEnd - 0.04),
+                  (v) => setState(() => clip.rampStart = v)),
+                'End' => _sliderControl('End point',
+                  clip.rampEnd, math.min(0.99, clip.rampStart + 0.04), 1,
+                  (v) => setState(() => clip.rampEnd = v)),
+                'Slow' => _sliderControl('Slow speed multiplier',
+                  clip.rampSlow, 0.1, 1,
+                  (v) => setState(() => clip.rampSlow = v)),
+                _ => _sliderControl('Smooth entry / exit',
+                  clip.rampEase, 0.01, 0.20,
+                  (v) => setState(() => clip.rampEase = v)),
+              }
+              : const Center(child: Text(
+                  'Enable ramp to slow a portion, then return to normal.',
+                  style: TextStyle(fontSize: 12))),
+          ]);
         case 'Photo duration':
           if (!clip.isImage) {
             return const Center(child: Text('Duration works on photos only.'));
@@ -2125,23 +2812,100 @@ class _EditorScreenState extends State<EditorScreen> {
       switch (tool) {
         case 'Brightness':
           return _sliderControl('Brightness', clip.brightness, -0.5, 0.5,
-            (v) => setState(() => clip.brightness = v));
+              (v) => setState(() => clip.brightness = v));
+        case 'Exposure':
+          return _sliderControl('Exposure', clip.exposure, -1.5, 1.5,
+              (v) => setState(() => clip.exposure = v));
         case 'Contrast':
           return _sliderControl('Contrast', clip.contrast, 0.5, 1.5,
-            (v) => setState(() => clip.contrast = v));
+              (v) => setState(() => clip.contrast = v));
         case 'Saturation':
           return _sliderControl('Saturation', clip.saturation, 0, 2,
-            (v) => setState(() => clip.saturation = v));
+              (v) => setState(() => clip.saturation = v));
+        case 'Shadows':
+          return _sliderControl('Shadows', clip.shadows, -1, 1,
+              (v) => setState(() => clip.shadows = v),
+              description: 'Tonal preview is approximate; export uses a curve.');
+        case 'Midtones':
+          return _sliderControl('Midtones', clip.midtones, -1, 1,
+              (v) => setState(() => clip.midtones = v),
+              description: 'Tonal preview is approximate; export uses a curve.');
+        case 'Highlights':
+          return _sliderControl('Highlights', clip.highlights, -1, 1,
+              (v) => setState(() => clip.highlights = v),
+              description: 'Tonal preview is approximate; export uses a curve.');
+        case 'Whites':
+          return _sliderControl('Whites', clip.whites, -1, 1,
+              (v) => setState(() => clip.whites = v));
+        case 'Blacks':
+          return _sliderControl('Blacks', clip.blacks, -1, 1,
+              (v) => setState(() => clip.blacks = v));
+        case 'White Balance':
+          return Column(children: [
+            SizedBox(height: 34, child: Row(
+              mainAxisAlignment: MainAxisAlignment.center, children: [
+              for (final name in const ['Temperature', 'Tint'])
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: ChoiceChip(
+                    visualDensity: VisualDensity.compact,
+                    label: Text(name),
+                    selected: _wbControl == name,
+                    onSelected: (_) => setState(() => _wbControl = name),
+                  )),
+            ])),
+            Expanded(child: _wbControl == 'Temperature'
+                ? _sliderControl('Warm / cool', clip.temperature, -1, 1,
+                    (v) => setState(() => clip.temperature = v))
+                : _sliderControl('Green / magenta', clip.tint, -1, 1,
+                    (v) => setState(() => clip.tint = v))),
+          ]);
+        case 'RGB':
+          return Column(children: [
+            SizedBox(height: 34, child: Row(
+              mainAxisAlignment: MainAxisAlignment.center, children: [
+              for (final name in const ['Red', 'Green', 'Blue'])
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 4),
+                  child: ChoiceChip(
+                    visualDensity: VisualDensity.compact,
+                    label: Text(name),
+                    selected: _rgbChannel == name,
+                    onSelected: (_) => setState(() => _rgbChannel = name),
+                  )),
+            ])),
+            Expanded(child: switch (_rgbChannel) {
+              'Red' => _sliderControl('Red', clip.red, -1, 1,
+                  (v) => setState(() => clip.red = v)),
+              'Green' => _sliderControl('Green', clip.green, -1, 1,
+                  (v) => setState(() => clip.green = v)),
+              _ => _sliderControl('Blue', clip.blue, -1, 1,
+                  (v) => setState(() => clip.blue = v)),
+            }),
+          ]);
         case 'Clarity':
           return _sliderControl('Clarity', clip.clarity, 0, 1.5,
-            (v) => setState(() => clip.clarity = v),
-            description: 'Sharpening is applied on export, not live preview.');
+              (v) => setState(() => clip.clarity = v),
+              description: 'Sharpening is applied on export, not live preview.');
+        case 'Copy color':
+          return _actionControl('Store this clip’s color settings for another clip.',
+              'Copy', Icons.copy_outlined, () {
+                setState(() {
+                  _copiedColor = _colorSnapshot(clip);
+                  _message = 'Color adjustments copied.';
+                });
+              });
+        case 'Paste color':
+          return _actionControl('Apply copied settings to this selected clip.',
+              'Paste', Icons.paste_outlined,
+              _copiedColor == null ? null : () => _pasteColor(clip));
         case 'Reset all':
           return _actionControl(
-              'Reset brightness, contrast, saturation and clarity.',
+              'Reset lighting, white balance, RGB and clarity.',
               'Reset', Icons.restart_alt, () => _change((c) {
-                c.brightness = 0; c.contrast = 1;
-                c.saturation = 1; c.clarity = 0;
+                c.brightness = 0; c.exposure = 0; c.contrast = 1;
+                c.saturation = 1; c.clarity = 0; c.temperature = 0;
+                c.tint = 0; c.red = 0; c.green = 0; c.blue = 0;
+                c.shadows = 0; c.midtones = 0; c.highlights = 0;
+                c.whites = 0; c.blacks = 0;
               }));
       }
     }
