@@ -26,7 +26,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   static const formats = <String>{
     '.mp4', '.m4v', '.mov', '.mpg', '.mpeg', '.m2v', '.mkv', '.avi',
     '.webm', '.wmv', '.asf', '.ts', '.mts', '.m2ts', '.flv',
-    '.3gp', '.vob', '.divx',
+    '.3gp', '.vob', '.divx', '.vid',
   };
 
   final _files = <String>[];
@@ -36,6 +36,8 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
   bool _openedFromRecoveries = false;
   int _fileGeneration = 0;
   bool _loading = false;
+  bool _preferAndroidForMpeg = false;
+  bool _mpegUsesMpv = false;
   bool _controlsVisible = true;
   bool _fullScreen = false;
   bool _fill = false;
@@ -250,6 +252,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       _openedFromRecoveries = false;
       _files..clear()..addAll(paths);
       _index = 0;
+      _preferAndroidForMpeg = false;
       await _openFile();
     } catch (e) {
       if (mounted) {
@@ -275,6 +278,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
     setState(() {
       _video = null;
       _loading = true;
+      _mpegUsesMpv = false;
       _error = null;
       _seekBroken = false;
       _scrubbing = false;
@@ -296,6 +300,24 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
         await old.dispose();
       }
       if (!mounted || generation != _fileGeneration) {
+        return;
+      }
+      // Old MPEG files may have video that Android recognizes but does not
+      // decode. MPV has its own decoder stack, so prefer that path first.
+      // The Android path remains available as an explicit option.
+      final mpegFile = <String>{'.mpg', '.mpeg'}
+          .contains(p.extension(source).toLowerCase());
+      if (mpegFile && widget.legacyBuilder != null &&
+          !_preferAndroidForMpeg) {
+        setState(() {
+          _loading = false;
+          _mpegUsesMpv = true;
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && generation == _fileGeneration && _mpegUsesMpv) {
+            unawaited(_compare());
+          }
+        });
         return;
       }
       final player = VideoPlayerController.file(File(source));
@@ -331,6 +353,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
       return;
     }
     _index = (_index + delta + _files.length) % _files.length;
+    _preferAndroidForMpeg = false;
     await _openFile();
   }
 
@@ -988,7 +1011,7 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
                 child: Text(_repeat ? 'Repeat off' : 'Repeat video')),
               if (widget.legacyBuilder != null)
                 const PopupMenuItem(value: 'legacy',
-                  child: Text('Compare legacy MPV player')),
+                  child: Text('Play using MPV decoder')),
             ],
           ),
         ]),
@@ -1096,7 +1119,9 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
         else
           Center(child: Padding(
             padding: const EdgeInsets.all(20),
-            child: Text(_error ?? 'Video unavailable.',
+            child: Text(_mpegUsesMpv
+                ? 'This MPEG opens with the MPV decoder for broader video support.'
+                : (_error ?? 'Video unavailable.'),
               textAlign: TextAlign.center))),
         if ((_scrubbing || _finishingScrub) &&
             _previewFrameReady && _previewTexture != null)
@@ -1129,6 +1154,19 @@ class _AndroidV2PlayerState extends State<AndroidV2Player> {
         if (!_loading && !_ready)
           Positioned(bottom: 32, left: 0, right: 0,
             child: Column(mainAxisSize: MainAxisSize.min, children: [
+              if (_mpegUsesMpv && widget.legacyBuilder != null)
+                FilledButton.icon(
+                  onPressed: () => unawaited(_compare()),
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Play using MPV')),
+              if (_mpegUsesMpv)
+                TextButton.icon(
+                  onPressed: () {
+                    _preferAndroidForMpeg = true;
+                    unawaited(_openFile());
+                  },
+                  icon: const Icon(Icons.swap_horiz),
+                  label: const Text('Try Android decoder instead')),
               FilledButton.icon(
                 onPressed: () => unawaited(_pickFile()),
                 icon: const Icon(Icons.folder_open),
