@@ -543,12 +543,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
     // the user on a permanent spinner when malformed media plays audio only.
     _videoStartWatchdog = Timer(const Duration(seconds: 25), () {
       if (!mounted || generation != _openGeneration ||
-          _playbackFailed || files.isEmpty) return;
+          _playbackFailed || files.isEmpty) {
+        return;
+      }
       final params = player.state.videoParams;
       final hasAdvancingVideo = (params.w ?? 0) > 0 &&
           (params.h ?? 0) > 0 &&
           player.state.position > const Duration(seconds: 1);
-      if (hasAdvancingVideo) return;
+      if (hasAdvancingVideo) {
+        return;
+      }
       setState(() {
         error = 'No usable video frames appeared within 25 seconds. '
             'The source may have damaged video headers or contain audio only.';
