@@ -28,6 +28,9 @@ jobs:
           cache: true
       - name: Generate Windows runner
         run: flutter create --platforms=windows --project-name=droid_vid_player .
+      - name: Remove Flutter example test
+        shell: pwsh
+        run: Remove-Item test/widget_test.dart -ErrorAction SilentlyContinue
       - name: Fetch packages
         run: flutter pub get
       - name: Analyze Dart source
