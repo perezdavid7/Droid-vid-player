@@ -30,6 +30,25 @@ GitHub Actions workflow: **Build Android APK** in the Actions tab. It runs on so
 
 The job generates the Android host scaffold with `flutter create --platforms=android .` until checked-in native host files are stabilized. Build numbers increment automatically with `GITHUB_RUN_NUMBER`.
 
+## Windows laptop build
+
+GitHub Actions workflow: **Build Windows VersaPlay**. A successful run uploads
+`VersaPlay-Windows-x64`. Download and extract the entire artifact, keeping the
+executable next to its `data` directory and bundled DLLs; launching just a
+copied `.exe` can fail. This is an experimental Windows x64 build, not an
+installer. It requires real laptop playback and recovery validation.
+
+### MPEG-1 recovery triage (experimental)
+
+Automatic MPEG-PS scanning reports pack/video-packet/sequence/picture evidence
+even when none of the bounded samples passes a three-frame decoder test.
+Up to eight structurally promising, nonadjacent **exploratory** windows can be
+queued for a second recovery attempt. They are explicitly *unverified*; only
+resulting clips that pass decoder verification are retained as successful
+recoveries. An exploratory job is limited to two minutes, and the original
+source is never modified. This may expose useful footage, but raw marker
+counts and missing dimensions do not prove that any frames can be restored.
+
 ### Stable Android updates: one-time private signing setup
 
 Current debug-signed development APKs made on different runners may **not** install over one another because their signing certificates differ. To resolve this, configure a permanent private JKS keystore once using these **GitHub Actions repository secrets**:

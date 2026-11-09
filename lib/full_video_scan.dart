@@ -30,6 +30,8 @@ class FullRecoveryJob {
   final int? guessedWidth;
   final int? guessedHeight;
   final int? guessedTimeBase;
+  final bool exploratory;
+  final String evidence;
 
   const FullRecoveryJob({
     required this.startByte,
@@ -44,6 +46,8 @@ class FullRecoveryJob {
     this.guessedWidth,
     this.guessedHeight,
     this.guessedTimeBase,
+    this.exploratory = false,
+    this.evidence = '',
     this.startSeconds,
     this.endSeconds,
     this.totalSeconds,
@@ -163,22 +167,25 @@ class FullVideoScan {
     final isTs = identification.format == 'MPEG transport stream' ||
         (_ts.contains(extension) && identification.category == 'unknown');
     if (isPs) {
-      final found = await MpegFullScan.scan(path,
+      final report = await MpegFullScan.scanDetailed(path,
         isCancelled: isCancelled,
         onByteProgress: onByteProgress,
         onProbeProgress: onProbeProgress);
       return FullScanResult(
         scanner: 'MPEG Program Stream',
-        explanation: 'Every byte inspected; independently decoded '
-            'MPEG packet windows were grouped into bounded jobs.',
+        explanation: 'Every source byte inspected. ${report.explanation}',
         exactByteRanges: true,
         jobs: [
-          for (final region in found)
+          for (final region in [...report.verified, ...report.exploratory])
             FullRecoveryJob(
               startByte: region.startByte, endByte: region.endByte,
               sourceBytes: sourceBytes, videoStream: region.videoStream,
-              inputFormat: 'mpeg', inputExtension: '.mpg',
+              inputFormat: region.inputFormat,
+              inputExtension: region.inputFormat == 'mpegvideo'
+                  ? '.m1v' : '.mpg',
               legacyMpeg: true,
+              exploratory: region.exploratory,
+              evidence: region.evidence,
             ),
         ],
       );

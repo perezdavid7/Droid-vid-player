@@ -260,13 +260,15 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         _fullRegions = regions;
         _fullJobStatus = List<String>.filled(
             regions.length, 'Waiting to recover');
+        final exploratory = regions.where((r) => r.exploratory).length;
         _status = regions.isEmpty
             ? 'Inspected 100% of source bytes. '
               'No independently verified recovery sections were found; '
               'see the scanner explanation below.'
             : 'Full scan complete using ${scanResult.scanner}. '
-              'Found ${regions.length} recovery jobs; '
-              'processing them independently.';
+              'Found ${regions.length - exploratory} decoder-verified '
+              'and $exploratory exploratory jobs; processing independently. '
+              'Exploratory evidence does not guarantee playable footage.';
       });
       if (regions.isEmpty) return;
 
@@ -288,6 +290,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
         final label = '${region.isByteRange ? "" : "~"}'
             '${region.startPercent.toStringAsFixed(1)}–'
             '${region.endPercent.toStringAsFixed(1)}%';
+        final kind = region.exploratory
+            ? 'Exploratory MPEG candidate' : 'Decoder-verified section';
         final stem = '${baseName}_fullscan_job'
             '${(i + 1).toString().padLeft(3, "0")}'
             '_${DateTime.now().millisecondsSinceEpoch}';
@@ -319,7 +323,7 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
                   ? 'Copying isolated source bytes'
                   : 'Preparing indexed video interval';
               _status = 'Job ${i + 1}/${regions.length} ($label): '
-                  'preparing recovery. Original is untouched.';
+                  '$kind. Preparing recovery; original is untouched.';
             });
           }
           if (temporary != null) {
@@ -398,11 +402,13 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
           FFmpegSession ended;
           try {
             ended = await finished.future.timeout(
-                const Duration(minutes: 20));
+                region.exploratory
+                    ? const Duration(minutes: 2)
+                    : const Duration(minutes: 20));
           } on TimeoutException {
             if (_sessionId != null) await FFmpegKit.cancel(_sessionId);
             throw StateError('This recovery job stopped responding '
-                'after 20 minutes. Moving to the next section.');
+                'and was cancelled. Moving to the next section.');
           }
           _sessionId = null;
           _stopSegmentTimer();
@@ -444,6 +450,8 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
             'Verified configuration remembered: $settingsRemembered\n'
             'Position: $label\n'
             'Selected stream: ${region.videoStream}\n'
+            'Classification: $kind\n'
+            'Evidence: ${region.evidence}\n'
             'Result: ${verified.length} verified / ${clips.length} output clips\n'
             'FFmpeg exit: $returnCode\n\n$logs',
             flush: true,
@@ -998,10 +1006,13 @@ class _RecoveryScreenState extends State<RecoveryScreen> {
               const SizedBox(height: 12),
               RecoveryDestinationPicker(disabled: locked),
               const SizedBox(height: 14),
-              const Text(
-                'Keep Droid Vid Player open and the phone plugged in for '
-                'long recoveries. This first version keeps the screen awake '
-                'but does not yet support reliable background processing.',
+              Text(
+                Platform.isAndroid
+                    ? 'Keep VersaPlay open and the phone plugged in for '
+                      'long recoveries. Background recovery is not yet reliable.'
+                    : 'Keep VersaPlay open and the computer awake for '
+                      'long recoveries. For laptops, connect power. '
+                      'Background recovery is not yet reliable.',
                 style: TextStyle(color: Colors.amberAccent)),
               const SizedBox(height: 18),
               Text(_status, style: const TextStyle(fontSize: 16)),

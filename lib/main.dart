@@ -54,6 +54,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   StreamSubscription<bool>? _completedSubscription;
   StreamSubscription<Duration>? _positionSubscription;
   StreamSubscription<String>? _errorSubscription;
+  Timer? _videoStartWatchdog;
+  int _openGeneration = 0;
 
   PlaylistMode _repeatMode = PlaylistMode.none;
   bool _ended = false;
@@ -186,6 +188,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
     });
     _positionSubscription = player.stream.position.listen((position) {
       if (!mounted || _scrubbing) return;
+      // Decoder video dimensions plus advancing playback are a practical
+      // indication that startup completed. Audio-only MPEGs have neither.
+      final params = player.state.videoParams;
+      if (_videoStartWatchdog != null &&
+          (params.w ?? 0) > 0 && (params.h ?? 0) > 0 &&
+          position > const Duration(seconds: 1)) {
+        _videoStartWatchdog?.cancel();
+        _videoStartWatchdog = null;
+      }
       if (_shuttling) {
         // Reverse playback deliberately runs timestamps backward.
         _lastPosition = position;
@@ -226,6 +237,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
         }
       });
       if (fatal) _hideTimer?.cancel();
+      if (fatal) {
+        _videoStartWatchdog?.cancel();
+        _videoStartWatchdog = null;
+      }
     });
     _playingSubscription = player.stream.playing.listen((playing) {
       if (!mounted) return;
@@ -310,6 +325,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _videoStartWatchdog?.cancel();
     _cancelLiveScrubQueue();
     _slowGeneration++;
     _shuttleGeneration++;
@@ -387,6 +403,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   // A failed decoder must never trap the user inside the player.
   void _leaveFailedVideo() {
     _hideTimer?.cancel();
+    _videoStartWatchdog?.cancel();
+    _videoStartWatchdog = null;
+    _openGeneration++;
     _cancelLiveScrubQueue();
     _scrubGeneration++;
     setState(() {
@@ -501,6 +520,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> load(List<String> paths, {int start = 0}) async {
+    _videoStartWatchdog?.cancel();
+    final generation = ++_openGeneration;
     setState(() {
       files..clear()..addAll(paths);
       error = null;
@@ -518,16 +539,45 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _cancelLiveScrubQueue();
     _scrubGeneration++;
     _resetZoom(wakeControls: false);
+    // `player.open` can complete without yielding video frames. Do not leave
+    // the user on a permanent spinner when malformed media plays audio only.
+    _videoStartWatchdog = Timer(const Duration(seconds: 25), () {
+      if (!mounted || generation != _openGeneration ||
+          _playbackFailed || files.isEmpty) {
+        return;
+      }
+      final params = player.state.videoParams;
+      final hasAdvancingVideo = (params.w ?? 0) > 0 &&
+          (params.h ?? 0) > 0 &&
+          player.state.position > const Duration(seconds: 1);
+      if (hasAdvancingVideo) {
+        return;
+      }
+      setState(() {
+        error = 'No usable video frames appeared within 25 seconds. '
+            'The source may have damaged video headers or contain audio only.';
+        _playbackFailed = true;
+        _failedSourcePath = paths[start.clamp(0, paths.length - 1)];
+        _showControls = false;
+      });
+      _hideTimer?.cancel();
+      unawaited(player.stop().timeout(const Duration(seconds: 2))
+          .catchError((Object _) {}));
+    });
     try {
       await player.open(Playlist(
         paths.map((path) => Media(Uri.file(path).toString())).toList(),
         index: start < 0 ? 0 : start,
-      ));
+      )).timeout(const Duration(seconds: 25));
       await player.setPlaylistMode(_repeatMode);
     } catch (e) {
       if (!mounted) return;
+      _videoStartWatchdog?.cancel();
+      _videoStartWatchdog = null;
       setState(() {
-        error = e.toString();
+        error = e is TimeoutException
+            ? 'The video decoder did not finish opening within 25 seconds.'
+            : e.toString();
         _playbackFailed = true;
         _failedSourcePath = paths[start.clamp(0, paths.length - 1)];
         _showControls = false;

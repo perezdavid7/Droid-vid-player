@@ -1,0 +1,48 @@
+name: Build Windows VersaPlay
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'lib/**'
+      - 'pubspec.yaml'
+      - '.github/workflows/windows-build.yml'
+  pull_request:
+    paths:
+      - 'lib/**'
+      - 'pubspec.yaml'
+      - '.github/workflows/windows-build.yml'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Generate Windows runner
+        run: flutter create --platforms=windows --project-name=droid_vid_player .
+      - name: Remove Flutter example test
+        shell: pwsh
+        run: Remove-Item test/widget_test.dart -ErrorAction SilentlyContinue
+      - name: Fetch packages
+        run: flutter pub get
+      - name: Analyze Dart source
+        run: flutter analyze
+      - name: Test MPEG evidence scan
+        run: flutter test test/mpeg_full_scan_test.dart
+      - name: Build complete Windows executable bundle
+        run: flutter build windows --release
+      - name: Upload Windows bundle (all DLLs and data files)
+        uses: actions/upload-artifact@v4
+        with:
+          name: VersaPlay-Windows-x64
+          path: build/windows/x64/runner/Release/**
+          if-no-files-found: error
+          retention-days: 14
