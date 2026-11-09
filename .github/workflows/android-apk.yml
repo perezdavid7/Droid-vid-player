@@ -46,6 +46,8 @@ jobs:
         run: flutter pub get
       - name: Analyze
         run: flutter analyze
+      - name: Test MPEG evidence scan
+        run: flutter test test/mpeg_full_scan_test.dart
       - name: Prepare Android NDK (retry damaged downloads)
         shell: bash
         timeout-minutes: 12
